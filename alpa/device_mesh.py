@@ -2042,6 +2042,9 @@ class DeviceCluster:
         this cluster."""
         return mesh_profiling.profile_all(self, *args, **kwargs)
 
+    def profile_operands(self,  cluster_key, cache_filename, operands_info):
+        return mesh_profiling.profile_operands(self, cluster_key, cache_filename, operands_info)
+
 
 # Global runtime objects
 global_cluster: DeviceCluster = None

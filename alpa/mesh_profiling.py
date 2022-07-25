@@ -7,10 +7,15 @@ import time
 
 import numpy as np
 from jax._src.lib import xla_bridge as xb, xla_client as xc, xla_extension as xe
+from optax import scale
+from pytz import NonExistentTimeError
 import ray
 
 from alpa.util import (GB, print_used_time, XlaPassContext, to_str_round,
                        run_with_timeout)
+
+import logging
+logging.basicConfig(format='%(levelname)-8s [%(filename)s:%(lineno)d] %(message)s', level=logging.INFO)
 
 ops = xc.ops
 
@@ -241,6 +246,49 @@ def _op_all_reduce(operand, dtype, reduce_op, replica_groups, channel_id):
     return ret
 
 
+def _CreateBinaryAddComputation(dtype):
+    """Computation (dtype, dtype) -> dtype that adds its two parameters."""
+    c = _NewComputation("add_param0_by_param1")
+    shape = xc.shape_from_pyval(np.array(0, dtype=dtype))
+    shape = shape.with_major_to_minor_layout_if_absent()
+    ops.Add(ops.Parameter(c, 0, shape), ops.Parameter(c, 1, shape))
+    return c.build()
+
+def _NewComputation(name):
+      return xc.XlaBuilder(name)
+
+
+def _op_reduce(operand, dtype, reduce_op):
+    c = _NewComputation('a')
+    ret = ops.Reduce(
+        c,
+        operands=[
+            # ops.Constant(c, np.array([1.0, 2.0, 3.0, 4.0], dtype=dtype))
+            operand
+        ],
+        init_values=[ops.Constant(c, np.float32(0))],
+        computation=_CreateBinaryAddComputation(dtype),
+        dimensions_to_reduce=[0])
+    print("#######invoked")
+    return ret
+
+    # if reduce_op == "add":
+    #     builder = xc.XlaBuilder("reduce_" + reduce_op)
+    #     x = _op_parameter(builder, 0, (), dtype)
+    #     y = _op_parameter(builder, 1, (), dtype)
+    #     z = ops.Add(x, y)
+    #     rc = builder.build(z)
+    # else:
+    #     raise NotImplementedError
+    
+    # # init_values = _op_parameter(builder, 0, (1,), dtype)
+    # init_values = ops.ConstantLiteral(builder, np.array(0, dtype))
+    # # print(init_values)
+    # b = xc.XlaBuilder('out_builder')
+    # ret = ops.Reduce(b, [operand], [init_values], rc, [0])
+    # return ret
+
+
 def _op_all_to_all(operand, replica_groups, channel_id):
     replica_groups_protos = xc.make_replica_groups(replica_groups)
     ret = ops.AllToAll(operand, 0, 0, len(replica_groups[0]),
@@ -263,7 +311,24 @@ def _op_reduce_scatter(operand, dtype, reduce_op, replica_groups, channel_id):
                             replica_groups_protos, channel_id, None, True)
     return ret
 
+def _op_reduce2(operand, dtype, reduce_op):
+    if reduce_op == "add":
+        builder = xc.XlaBuilder("reduce_" + reduce_op)
+        x = _op_parameter(builder, 0, (), dtype)
+        y = _op_parameter(builder, 1, (), dtype)
+        z = ops.Add(x, y)
+        rc = builder.build(z)
+    else:
+        raise NotImplementedError
+    
+    # init_values = _op_parameter(builder, 0, (1,), dtype)
+    init_values = ops.ConstantLiteral(builder, np.array(0, dtype))
+    # print(init_values)
 
+    ret = ops.Reduce(builder, [operand], [init_values], rc, [0])
+    return ret
+
+    
 def _compile_profiling_executable_while_loop(backend, shapes, op_func,
                                              num_devices):
     """
@@ -274,6 +339,9 @@ def _compile_profiling_executable_while_loop(backend, shapes, op_func,
     in_tuple_shape = xc.Shape.tuple_shape(
         [xc.Shape.array_shape(np.dtype(np.int32), ())] +
         [xc.Shape.array_shape(dtype, shape) for shape, dtype in shapes])
+
+    # print("tuple shapes:", in_tuple_shape.__repr__())
+    # exit()
 
     sharding = xc.OpSharding()
     sharding.type = sharding.type.REPLICATED
@@ -290,6 +358,22 @@ def _compile_profiling_executable_while_loop(backend, shapes, op_func,
         ops.GetTupleElement(in_tuple, i + 1) for i in range(len(shapes))
     ]
     body.set_sharding(sharding)
+    
+
+    if op_func is None:
+        def op_func(operands):
+            # c = _NewComputation('a')
+            ret = ops.Reduce(
+                body,
+                operands=[
+                    # ops.Constant(c, np.array([1.0, 2.0, 3.0, 4.0], dtype=dtype))
+                    operands[0]
+                ],
+                init_values=[ops.Constant(body, np.float32(0))],
+                computation=_CreateBinaryAddComputation(np.float32),
+                dimensions_to_reduce=[0])
+            operands[1] = ret
+
     op_func(operands)
     body.clear_sharding()
     ops.Tuple(body, [counter] + operands)
@@ -382,6 +466,151 @@ def rank_0_print(host_id, msg):
 communicator_set = set()
 
 
+def profile_operands(device_cluster, cluster_key, cache_filename, operands_info):
+    # for shape in operands_info:
+    #     logging.info(f'{shape.__repr__()} {shape[1][0].dimensions()}')
+
+    """extract distinct op + operands shape"""
+    op_dict = {}
+    for op, operands_shape in operands_info:
+        # logging.info(f'{op}, {operands_shape}')
+        if op not in op_dict:
+            op_dict[op] = set()
+        op_dict[op].add(tuple(operands_shape))
+
+    for op, shapes in op_dict.items():
+        logging.info(f'{op}: {shapes}')
+
+    """Profile the compute cost of operand."""
+    physical_mesh = device_cluster.get_physical_mesh(host_ids=[0],
+                                                     num_devices_per_host=1)
+
+    num_gpu = 4
+    op_infos_dict = dict()
+
+    for op, shapes in op_dict.items():
+        if op=='add' or op=='multiply' or op=='divide' or op=='sqrt' or op=='subtract' or op=='power' or op =='transpose':
+            if op not in op_infos_dict:
+                op_infos_dict[op] = set()
+            for operands_shape in shapes:
+                first_operand_shape = operands_shape[0]
+                dtype_str = str(first_operand_shape.element_type())
+                dim = first_operand_shape.dimensions()
+                if len(dim) == 0: # scalar
+                    shape_ = dim
+                    op_infos_dict[op].add((shape_, dtype_str))
+                else:
+                    batch_dim = dim[0]
+                    # for i in range(1, min(num_gpu, batch_dim)+1):
+                    for i in range(1, 2):
+                        if i != 1 and i % 2 != 0:
+                            continue
+                        dim = list(first_operand_shape.dimensions())
+                        dim[0] = int(dim[0] / i)
+                        shape_ = tuple(dim)
+                        op_infos_dict[op].add((shape_, dtype_str))
+        if op=='reshape' or op =='dot':
+            if op not in op_infos_dict:
+                op_infos_dict[op] = set()
+            for operands_shape in shapes:
+                assert len(operands_shape) == 2, f'reshape has {len(operands_shape)} operands: {operands_shape}'
+                original_shape, target_shape = operands_shape
+                dtype_str = str(original_shape.element_type())
+                op_infos_dict[op].add(((original_shape.dimensions(), target_shape.dimensions()), dtype_str))
+        if op=='reduce':
+            if op not in op_infos_dict:
+                op_infos_dict[op] = set()
+            op_infos_dict[op].add(((2,1), 'f32'))
+       
+    op_infos = []
+    for op, infos in op_infos_dict.items():
+        op_infos += [(op, info) for info in infos]
+
+    
+    results = physical_mesh.profile_hlo_ops(op_infos, cache_filename)
+
+    logging.info("results:")
+    logging.info(f'{results}')
+
+
+    runtime = 0
+    for op, shapes in operands_info:
+        operands_shape = tuple(shapes)
+        logging.info(f"!!!!!! {op} : {shapes}")
+        if op not in op_infos_dict:
+            logging.info(f'{op} not profiled')
+            continue
+        
+        
+
+        if op=='add' or op=='multiply' or op=='divide' or op=='sqrt' or op=='subtract' or op=='power' or op =='transpose':
+            first_operand_shape = operands_shape[0]
+            dtype_str = str(first_operand_shape.element_type())
+            dim = first_operand_shape.dimensions()
+            if len(dim) == 0: # scalar
+                shape_ = dim
+                info = (shape_, dtype_str)
+            else:
+                # for i in range(1, min(num_gpu, batch_dim)+1):
+                for i in range(1, 2):
+                    if i != 1 and i % 2 != 0:
+                        continue
+                    dim = list(first_operand_shape.dimensions())
+                    dim[0] = int(dim[0] / i)
+                    shape_ = tuple(dim)
+                    info = (shape_, dtype_str)
+            res = results[(op, info)]
+            runtime += res
+
+        if op=='reshape' or op =='dot':
+            logging.info(f"###### {operands_shape}")
+            assert len(operands_shape) == 2, f'{op} has {len(operands_shape)} operands: {operands_shape}'
+            original_shape, target_shape = operands_shape
+            dtype_str = str(original_shape.element_type())
+            op_infos_dict[op].add(((original_shape.dimensions(), target_shape.dimensions()), dtype_str))
+
+            res = results[(op, ((original_shape.dimensions(), target_shape.dimensions()), dtype_str))]
+            runtime += res
+        if op=='reduce':
+            op_infos_dict[op].add(((2,1), 'f32'))
+            res = results[(op, ((2,1), 'f32'))]
+            runtime += res
+
+    logging.info(f'runtime: {runtime}') # runtime: 0.0011827544076368213
+        
+    
+    exit()
+
+
+
+          
+
+    """Profile the compute cost of dot."""
+    physical_mesh = device_cluster.get_physical_mesh(host_ids=[0],
+                                                     num_devices_per_host=1)
+
+    # Profile dot
+    op_infos = []
+    for dtype in ["f16", "f32"]:
+        for n in dot_range:
+            op_infos.append(("dot", (n, n, n, dtype)))
+    results = physical_mesh.profile_hlo_ops(op_infos, cache_filename)
+
+    exit()
+
+    dot_cost_dict = defaultdict(list)
+    for i in range(len(op_infos)):
+        n, m, k, dtype = op_infos[i][1]
+        flop_count = 2 * n * m * k
+        dot_cost_dict[((), dtype)].append((flop_count, results[i]))
+        print(f"Matmul: {(n, m, k, dtype)}, "
+              f"TFLOPS: {flop_count / results[i]/ 1e12:.2f}")
+
+    physical_mesh.shutdown()
+    time.sleep(2)
+    return dot_cost_dict
+
+
 def profile_one_hlo_op(backend, local_devices, host_id, num_devices, op_info):
     """Profile one HLO operator."""
     dot_fp16_work = 100e12
@@ -390,25 +619,132 @@ def profile_one_hlo_op(backend, local_devices, host_id, num_devices, op_info):
     replica_groups = None
 
     if op_info[0] == "dot":
-        n, m, k, dtype_str = op_info[1]
+        # n, m, k, dtype_str = op_info[1]
+        # dtype = to_np_dtype(dtype_str)
+        # shapes = [((n, k), dtype), ((k, m), dtype), ((n, m), dtype)]
+
+        # def op_func(operands):
+        #     lhs, rhs, _ = operands
+        #     dim_numbers = (((1,), (0,)), ((), ()))
+        #     dim_numbers = xc.make_dot_dimension_numbers(dim_numbers)
+        #     out = ops.DotGeneral(lhs, rhs, dim_numbers)
+        #     operands[-1] = out
+
+        # flop_ct = max(2 * n * m * k, 1)
+        # if dtype_str == "f16":
+        #     work = dot_fp16_work
+        # elif dtype_str == "f32":
+        #     work = dot_fp32_work
+        # else:
+        #     raise ValueError(f"Invalid type: {dtype_str}")
+        # number = bound(int(work / flop_ct), 10, 1 << 12)
+        (lhs_shape, rhs_shape), dtype_str = op_info[1]
+        if lhs_shape[1] == rhs_shape[0]:
+            dim_numbers = (((1,), (0,)), ((), ()))
+            out_shape = (lhs_shape[0],rhs_shape[1])
+        elif lhs_shape[0] == rhs_shape[0]:
+            dim_numbers = (((0,), (0,)), ((), ()))
+            out_shape = (lhs_shape[1],rhs_shape[1])
         dtype = to_np_dtype(dtype_str)
-        shapes = [((n, k), dtype), ((k, m), dtype), ((n, m), dtype)]
+        shapes = [(lhs_shape, dtype), (rhs_shape, dtype), (out_shape, dtype)]
+        def op_func(operands):
+            lhs, rhs, _ = operands
+            dim_numbers_ = xc.make_dot_dimension_numbers(dim_numbers)
+            out = ops.DotGeneral(lhs, rhs, dim_numbers_)
+            operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "add":
+        shape, dtype_str = op_info[1]
+        dtype = to_np_dtype(dtype_str)
+        # print(f"find {op_info[0]}:", shape, str(dtype))
+        shapes = [(shape, dtype), (shape, dtype), (shape, dtype)]
 
         def op_func(operands):
             lhs, rhs, _ = operands
-            dim_numbers = (((1,), (0,)), ((), ()))
-            dim_numbers = xc.make_dot_dimension_numbers(dim_numbers)
-            out = ops.DotGeneral(lhs, rhs, dim_numbers)
+            out = ops.Add(lhs, rhs)
             operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "subtract":
+        shape, dtype_str = op_info[1]
+        dtype = to_np_dtype(dtype_str)
+        # print(f"find {op_info[0]}:", shape, str(dtype))
+        shapes = [(shape, dtype), (shape, dtype), (shape, dtype)]
 
-        flop_ct = max(2 * n * m * k, 1)
-        if dtype_str == "f16":
-            work = dot_fp16_work
-        elif dtype_str == "f32":
-            work = dot_fp32_work
-        else:
-            raise ValueError(f"Invalid type: {dtype_str}")
-        number = bound(int(work / flop_ct), 10, 1 << 12)
+        def op_func(operands):
+            lhs, rhs, _ = operands
+            out = ops.Sub(lhs, rhs)
+            operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "multiply":
+        shape, dtype_str = op_info[1]
+        dtype = to_np_dtype(dtype_str)
+        # print(f"find {op_info[0]}:", shape, str(dtype))
+        shapes = [(shape, dtype), (shape, dtype), (shape, dtype)]
+
+        def op_func(operands):
+            lhs, rhs, _ = operands
+            out = ops.Mul(lhs, rhs)
+            operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "divide":
+        shape, dtype_str = op_info[1]
+        dtype = to_np_dtype(dtype_str)
+        # print(f"find {op_info[0]}:", shape, str(dtype))
+        shapes = [(shape, dtype), (shape, dtype), (shape, dtype)]
+
+        def op_func(operands):
+            lhs, rhs, _ = operands
+            out = ops.Div(lhs, rhs)
+            operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "power":
+        shape, dtype_str = op_info[1]
+        dtype = to_np_dtype(dtype_str)
+        # print(f"find {op_info[0]}:", shape, str(dtype))
+        shapes = [(shape, dtype), (shape, dtype), (shape, dtype)]
+
+        def op_func(operands):
+            lhs, rhs, _ = operands
+            out = ops.Pow(lhs, rhs)
+            operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "sqrt":
+        shape, dtype_str = op_info[1]
+        dtype = to_np_dtype(dtype_str)
+        # print(f"find {op_info[0]}:", shape, str(dtype))
+        shapes = [(shape, dtype), (shape, dtype)]
+
+        def op_func(operands):
+            lhs, _ = operands
+            out = ops.Sqrt(lhs)
+            operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "reshape":
+        (original_shape, target_shape), dtype_str = op_info[1]
+        dtype = to_np_dtype(dtype_str)
+        shapes = [(original_shape, dtype), (target_shape, dtype)]
+        def op_func(operands):
+                operand, _= operands
+                out = ops.Reshape(operand, list(target_shape))
+                operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "transpose":
+        original_shape, dtype_str = op_info[1]
+        assert len(original_shape)==2, f'transpose has {len(original_shape)} dimensions, {original_shape}'
+        dtype = to_np_dtype(dtype_str)
+        shapes = [(original_shape, dtype), (original_shape[::-1], dtype)]
+        def op_func(operands):
+                operand, _= operands
+                out = ops.Transpose(operand, (1,0))
+                operands[-1] = out
+        number = 1 << 12
+    elif op_info[0] == "reduce":
+        dtype = np.dtype(np.float32)
+        shapes = [((2,), dtype), ((), dtype)]
+        def op_func(operands):
+            out = _op_reduce(operands[0], dtype, 'add')
+            operands[-1] = out
+        number = 1 << 5
     elif op_info[0] == "all-gather":
         replica_groups, dtype, size = op_info[1]
         dtype = to_np_dtype(dtype)
@@ -530,7 +866,11 @@ def profile_one_hlo_op(backend, local_devices, host_id, num_devices, op_info):
             f"timestamp: {time.time():.0f}.")
 
         # Compile
-        all_shapes, compiled = _compile_profiling_executable_while_loop(
+        if op_info[0] == 'reduce': 
+            all_shapes, compiled = _compile_profiling_executable_while_loop(
+            backend, shapes, None, num_devices)
+        else:
+            all_shapes, compiled = _compile_profiling_executable_while_loop(
             backend, shapes, op_func, num_devices)
 
         # Warm up
@@ -571,6 +911,8 @@ def profile_one_hlo_op(backend, local_devices, host_id, num_devices, op_info):
 
         # Return
         mean_time = (toc - tic) / number
+        rank_0_print(
+            host_id, f"mean time: {mean_time}")
         return mean_time
 
 
@@ -581,13 +923,18 @@ def profile_hlo_ops(op_infos, backend, local_devices, host_id, num_devices,
     save_every = 15
     barrier_every = 5
 
+    print(f'num of hosts: {host_id}, num_devices: {num_devices}')
+
     if os.path.exists(cache_filename):
-        rank_0_print(host_id,
-                     f"Load cached hlo op cost dict from {cache_filename}...")
-        with open(cache_filename, "rb") as cf:
-            cache_dict = pickle.load(cf)
+        # rank_0_print(host_id,
+        #              f"Load cached hlo op cost dict from {cache_filename}...")
+        # with open(cache_filename, "rb") as cf:
+        #     cache_dict = pickle.load(cf)
+            cache_dict = {}
     else:
         cache_dict = {}
+
+    
 
     old_cache_len = len(cache_dict)
 
@@ -630,6 +977,7 @@ def profile_hlo_ops(op_infos, backend, local_devices, host_id, num_devices,
         with open(cache_filename, "wb") as cf:
             pickle.dump(cache_dict, cf)
 
+    return cache_dict
     return np.array(results)
 
 
@@ -644,6 +992,8 @@ def profile_dot(dot_range, device_cluster, cache_filename):
         for n in dot_range:
             op_infos.append(("dot", (n, n, n, dtype)))
     results = physical_mesh.profile_hlo_ops(op_infos, cache_filename)
+
+    exit()
 
     dot_cost_dict = defaultdict(list)
     for i in range(len(op_infos)):

@@ -1,6 +1,7 @@
 """Compile executables for shard parallelism."""
 import hashlib
 import inspect
+import logging
 from typing import Callable, Sequence, Optional, Union
 
 import numpy as np
@@ -21,6 +22,11 @@ from alpa.shard_parallel.auto_sharding import (run_auto_sharding_pass,
                                                AutoShardingOption)
 from alpa.util import (jaxpr_to_hlo_module, trace_jaxpr_with_micro_batch,
                        setup_computation_alias, OrderedSet)
+
+
+# import benchmark.alpa.hlo_instruction.profile_hlo_instruction as profile_hlo_instruction
+
+from benchmark.alpa.hlo_instruction import profile_hlo_instruction
 
 
 def get_compute_key(fun: lu.WrappedFun, in_tree: PyTreeDef,
@@ -104,17 +110,45 @@ def shard_parallel_internal(
     # Trace to get jaxpr
     jaxpr, out_avals, consts = pe.trace_to_jaxpr_final(fun, avals)
 
+    # logging.info('jaxpr')
+    # logging.info(jaxpr)
+    # logging.info(f'num of eqns: {len(jaxpr.eqns)}')
+
     # Convert jaxpr to XLA HLO
     name = f"{fun.__name__}_shard_parallel"
     backend = xb.get_backend("gpu")
     hlo_module = jaxpr_to_hlo_module(name, ClosedJaxpr(jaxpr, consts),
                                      donated_invars, backend)
+
+    # logging.info(f'hlo opname: {hlo_module.hlo_opnames()}\n')
+
+    # logging.info(f'hlo opshape: {hlo_module.hlo_opshape()}\n')
+
+    logging.info(f'{hlo_module.to_string()}')
+    
+    logging.info(f'hlo operand count: {hlo_module.hlo_operand_count()}\n')
+
+
+    shapes_list = hlo_module.hlo_operand_shape()
+    # for shape in shapes_list:
+    #     logging.info(f'{shape.__repr__()}')
+
+    
+    profile_hlo_instruction.profile_hlo_instructions(shapes_list)
+
+    logging.info(f'{hlo_module.to_string()}')
+    # with open('test.dot', mode='w') as fout:
+    #     fout.write(xe.hlo_module_to_dot_graph(hlo_module))
     flop_count = xe.hlo_module_count_flop_dot_conv_only(hlo_module)
 
     # Compile a XLA executable
     hlo_module, stage_plan = run_auto_sharding_pass(hlo_module,
                                                     logical_mesh_choices[0],
                                                     "single", 1, as_option)
+
+    # logging.info('hlo module after auto sharding pass')
+    # logging.info(f'{hlo_module.to_string()}')
+
 
     # Compile a mesh executable
     return NormalMeshDriverExecutable(physical_mesh,
