@@ -14,7 +14,11 @@ import optax
 
 from alpa import (parallelize, LocalPhysicalDeviceMesh, AutoShardingOption,
                   ShardParallel, DataParallel, Zero2Parallel, Zero3Parallel)
-from alpa.util import map_to_shape, count_communication_primitives
+from alpa.util import map_to_shape, count_communication_primitives, benchmark_func
+
+
+import logging
+logging.basicConfig(format='%(levelname)-8s [%(filename)s:%(lineno)d] %(message)s', level=logging.INFO)
 
 
 def assert_close(x, y, atol=0.01):
@@ -188,9 +192,9 @@ class AutoShardingMLPTest(unittest.TestCase):
 
             @nn.compact
             def __call__(self, x):
-                for i in range(num_layers - 1):
-                    x = nn.Dense(features=hidden_dim, use_bias=use_bias)(x)
-                    x = nn.relu(x)
+                # for i in range(num_layers - 1):
+                #     x = nn.Dense(features=hidden_dim, use_bias=use_bias)(x)
+                #     x = nn.relu(x)
                 x = nn.Dense(features=output_dim, use_bias=use_bias)(x)
                 return x
 
@@ -201,7 +205,8 @@ class AutoShardingMLPTest(unittest.TestCase):
 
             def loss_func(params):
                 out = state.apply_fn(params, batch["x"])
-                return jnp.mean((out - batch["y"])**2)
+                return jnp.mean((out - batch["y"]))
+                # return jnp.mean((out - batch["y"])**2)
 
             grads = jax.grad(loss_func)(state.params)
             new_state = state.apply_gradients(grads=grads)
@@ -225,8 +230,25 @@ class AutoShardingMLPTest(unittest.TestCase):
         # JIT compile
         state = train_step(state, {"x": x, "y": y})
 
+        warmup = []
+        actual = []
+        import time
+        for i in range(5):
+            tic = time.time()
+            state = train_step(state, {"x": x, "y": y})
+            toc = time.time()
+            warmup.append(toc-tic)
+        for i in range(20):
+            tic = time.time()
+            state = train_step(state, {"x": x, "y": y})
+            toc = time.time()
+            actual.append(toc-tic)
+        print(f'time: {np.mean(warmup)} {np.mean(actual)}')
+        exit()
+
         # Get optimized HLO IR
         executable = train_step.get_last_executable()
+        # logging.info(executable.get_hlo_text())
         return (state, executable.get_hlo_text(),
                 executable.auto_sharding_objective)
 
@@ -287,16 +309,29 @@ class AutoShardingMLPTest(unittest.TestCase):
                     assert_row_partitioned(weight, mesh_shape[i], i)
 
     def test_n_layer_mlp_2d_mesh(self):
-        num_layers = 6
-        batch_size = 256
-        hidden_dim = 32
+        # num_layers = 6
+        # batch_size = 256
+        # hidden_dim = 32
+        num_layers = 1
+        batch_size = 1
+        hidden_dim = 1
+
+
+        input_dim = 20
+        hidden_dim = 30
+        output_dim = 1
+        batch_size = 50
 
         # Test on different device meshes
         mesh_shape = [2, 2]
         device_mesh = self.get_device_mesh(mesh_shape, [1, 1], [1, 0.1])
+
+
         state, hlo_ir, objective = self.run_n_layer_mlp(num_layers, batch_size,
-                                                        hidden_dim, hidden_dim,
+                                                        input_dim, output_dim,
                                                         hidden_dim, device_mesh)
+
+        exit()
 
         # Check communication cost
         expected = (num_layers *
@@ -436,21 +471,21 @@ def suite():
     def add(name):
         suite.addTest(AutoShardingMLPTest(name))
 
-    add("test_n_layer_mlp_data_parallel")
-    add("test_n_layer_mlp_model_parallel")
+    # add("test_n_layer_mlp_data_parallel")
+    # add("test_n_layer_mlp_model_parallel")
     add("test_n_layer_mlp_2d_mesh")
-    add("test_n_layer_mlp_force_data_parallel")
-    add("test_n_layer_mlp_force_batch_dim_mapping")
+    # add("test_n_layer_mlp_force_data_parallel")
+    # add("test_n_layer_mlp_force_batch_dim_mapping")
 
-    add("test_n_layer_mlp_data_parallel_reduce_scatter")
-    add("test_n_layer_mlp_model_parallel_reduce_scatter")
-    add("test_n_layer_mlp_2d_mesh_reduce_scatter")
+    # add("test_n_layer_mlp_data_parallel_reduce_scatter")
+    # add("test_n_layer_mlp_model_parallel_reduce_scatter")
+    # add("test_n_layer_mlp_2d_mesh_reduce_scatter")
 
-    add("test_n_layer_mlp_data_parallel_reduce_scatter_adafactor")
+    # add("test_n_layer_mlp_data_parallel_reduce_scatter_adafactor")
 
-    add("test_n_layer_mlp_data_parallel_reduce_scatter_zero_stage_3")
+    # add("test_n_layer_mlp_data_parallel_reduce_scatter_zero_stage_3")
 
-    add("test_weight_init")
+    # add("test_weight_init")
 
     return suite
 
