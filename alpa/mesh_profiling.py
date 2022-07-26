@@ -509,21 +509,31 @@ def profile_operands(device_cluster, cluster_key, cache_filename, operands_info)
                         dim[0] = int(dim[0] / i)
                         shape_ = tuple(dim)
                         op_infos_dict[op].add((shape_, dtype_str))
-        if op=='reshape' or op =='dot':
+        elif op =='dot':
             if op not in op_infos_dict:
                 op_infos_dict[op] = set()
             for operands_shape in shapes:
-                assert len(operands_shape) == 2, f'reshape has {len(operands_shape)} operands: {operands_shape}'
+                assert len(operands_shape) == 3, f'{op} has {len(operands_shape)} operands: {operands_shape}'
+                lhs_shape, rhs_shape, out_shape = operands_shape
+                dtype_str = str(lhs_shape.element_type())
+                op_infos_dict[op].add(((lhs_shape.dimensions(), rhs_shape.dimensions(), out_shape.dimensions()), dtype_str))
+        elif op=='reshape' :
+            if op not in op_infos_dict:
+                op_infos_dict[op] = set()
+            for operands_shape in shapes:
+                assert len(operands_shape) == 2, f'{op} has {len(operands_shape)} operands: {operands_shape}'
                 original_shape, target_shape = operands_shape
                 dtype_str = str(original_shape.element_type())
                 op_infos_dict[op].add(((original_shape.dimensions(), target_shape.dimensions()), dtype_str))
-        if op=='reduce':
+        elif op=='reduce':
             if op not in op_infos_dict:
                 op_infos_dict[op] = set()
             op_infos_dict[op].add(((2,1), 'f32'))
        
     op_infos = []
     for op, infos in op_infos_dict.items():
+        if op != 'dot':
+            continue
         op_infos += [(op, info) for info in infos]
 
     
@@ -532,17 +542,16 @@ def profile_operands(device_cluster, cluster_key, cache_filename, operands_info)
     logging.info("results:")
     logging.info(f'{results}')
 
-
     runtime = 0
     for op, shapes in operands_info:
+        if op != 'dot':
+            continue
         operands_shape = tuple(shapes)
         logging.info(f"!!!!!! {op} : {shapes}")
         if op not in op_infos_dict:
             logging.info(f'{op} not profiled')
             continue
         
-        
-
         if op=='add' or op=='multiply' or op=='divide' or op=='sqrt' or op=='subtract' or op=='power' or op =='transpose':
             first_operand_shape = operands_shape[0]
             dtype_str = str(first_operand_shape.element_type())
@@ -561,22 +570,26 @@ def profile_operands(device_cluster, cluster_key, cache_filename, operands_info)
                     info = (shape_, dtype_str)
             res = results[(op, info)]
             runtime += res
-
-        if op=='reshape' or op =='dot':
-            logging.info(f"###### {operands_shape}")
+        elif op =='dot':
+            assert len(operands_shape) == 3, f'{op} has {len(operands_shape)} operands: {operands_shape}'
+            lhs_shape, rhs_shape, out_shape = operands_shape
+            dtype_str = str(lhs_shape.element_type())
+            # op_infos_dict[op].add(((lhs_shape.dimensions(), rhs_shape.dimensions(), out_shape.dimensions()), dtype_str))
+            
+            res = results[(op, ((lhs_shape.dimensions(), rhs_shape.dimensions(), out_shape.dimensions()), dtype_str))]
+            runtime += res
+        elif op=='reshape':
             assert len(operands_shape) == 2, f'{op} has {len(operands_shape)} operands: {operands_shape}'
             original_shape, target_shape = operands_shape
             dtype_str = str(original_shape.element_type())
-            op_infos_dict[op].add(((original_shape.dimensions(), target_shape.dimensions()), dtype_str))
 
             res = results[(op, ((original_shape.dimensions(), target_shape.dimensions()), dtype_str))]
             runtime += res
-        if op=='reduce':
-            op_infos_dict[op].add(((2,1), 'f32'))
+        elif op=='reduce':
             res = results[(op, ((2,1), 'f32'))]
             runtime += res
 
-    logging.info(f'runtime: {runtime}') # runtime: 0.0011827544076368213
+    logging.info(f'sum runtime: {runtime}') # runtime: 0.0011827544076368213
         
     
     exit()
@@ -638,13 +651,18 @@ def profile_one_hlo_op(backend, local_devices, host_id, num_devices, op_info):
         # else:
         #     raise ValueError(f"Invalid type: {dtype_str}")
         # number = bound(int(work / flop_ct), 10, 1 << 12)
-        (lhs_shape, rhs_shape), dtype_str = op_info[1]
-        if lhs_shape[1] == rhs_shape[0]:
-            dim_numbers = (((1,), (0,)), ((), ()))
-            out_shape = (lhs_shape[0],rhs_shape[1])
-        elif lhs_shape[0] == rhs_shape[0]:
-            dim_numbers = (((0,), (0,)), ((), ()))
-            out_shape = (lhs_shape[1],rhs_shape[1])
+        (lhs_shape, rhs_shape, out_shape), dtype_str = op_info[1]
+
+        if out_shape[0] == lhs_shape[0]:
+            lhs_contrac_dim = 1
+        else:
+            lhs_contrac_dim = 0
+        if out_shape[1] == rhs_shape[0]:
+            rhs_contrac_dim = 1
+        else:
+            rhs_contrac_dim = 0
+        dim_numbers = (((lhs_contrac_dim,), (rhs_contrac_dim,)), ((), ()))
+
         dtype = to_np_dtype(dtype_str)
         shapes = [(lhs_shape, dtype), (rhs_shape, dtype), (out_shape, dtype)]
         def op_func(operands):

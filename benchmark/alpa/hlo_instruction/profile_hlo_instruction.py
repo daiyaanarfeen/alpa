@@ -12,6 +12,7 @@ import ray
 
 
 def profile_hlo_instructions(operands_info):
+    # return
     # for shape in operands_dict:
     #     logging.info(f'{shape.__repr__()} {shape[1][0].dimensions()}')
     

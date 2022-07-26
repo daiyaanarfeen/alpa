@@ -15,7 +15,7 @@ import optax
 from alpa import (parallelize, LocalPhysicalDeviceMesh, AutoShardingOption,
                   ShardParallel, DataParallel, Zero2Parallel, Zero3Parallel)
 from alpa.util import map_to_shape, count_communication_primitives, benchmark_func
-
+import time
 
 import logging
 logging.basicConfig(format='%(levelname)-8s [%(filename)s:%(lineno)d] %(message)s', level=logging.INFO)
@@ -172,7 +172,8 @@ class AutoShardingMLPTest(unittest.TestCase):
 
     def setUp(self):
         assert len(jax.local_devices()) >= 4
-        self.physical_mesh = LocalPhysicalDeviceMesh(jax.local_devices()[:4])
+        # self.physical_mesh = LocalPhysicalDeviceMesh(jax.local_devices()[:4])
+        self.physical_mesh = LocalPhysicalDeviceMesh(jax.local_devices()[:1])
         self.method = ShardParallel(auto_sharding_option=AutoShardingOption())
         self.optimizer_type = "adam"
 
@@ -192,13 +193,17 @@ class AutoShardingMLPTest(unittest.TestCase):
 
             @nn.compact
             def __call__(self, x):
-                # for i in range(num_layers - 1):
-                #     x = nn.Dense(features=hidden_dim, use_bias=use_bias)(x)
-                #     x = nn.relu(x)
+                for i in range(num_layers - 1):
+                    x = nn.Dense(features=hidden_dim, use_bias=use_bias)(x)
+                    # x = nn.relu(x)
                 x = nn.Dense(features=output_dim, use_bias=use_bias)(x)
                 return x
 
         self.method.devices = device_mesh
+
+        # @parallelize(method=self.method)
+        # def train_step(state, batch):
+        #     return state.apply_fn(params, batch["x"])
 
         @parallelize(method=self.method)
         def train_step(state, batch):
@@ -230,24 +235,43 @@ class AutoShardingMLPTest(unittest.TestCase):
         # JIT compile
         state = train_step(state, {"x": x, "y": y})
 
-        warmup = []
-        actual = []
-        import time
-        for i in range(5):
-            tic = time.time()
-            state = train_step(state, {"x": x, "y": y})
-            toc = time.time()
-            warmup.append(toc-tic)
-        for i in range(20):
-            tic = time.time()
-            state = train_step(state, {"x": x, "y": y})
-            toc = time.time()
-            actual.append(toc-tic)
-        print(f'time: {np.mean(warmup)} {np.mean(actual)}')
-        exit()
-
         # Get optimized HLO IR
         executable = train_step.get_last_executable()
+
+        
+
+
+        # Benchmark latency without driver overhead
+        niter = 20
+        warmup = 5
+        executable = train_step.get_last_executable()
+        for i in range(niter):
+            print(f"Iteration {i} ...")
+            state = train_step(state, {"x": x, "y": y})
+            self.physical_mesh.sync_workers()
+
+        latencies = executable.get_execution_time_costs()[warmup:]
+        print(f'latency without dirver overhead:: {np.mean(latencies)}')
+
+
+        # Benchmark latency with driver overhead
+        self.physical_mesh.sync_workers()
+        tic = time.time()
+        for i in range(niter):
+            state = train_step(state, {"x": x, "y": y})
+        self.physical_mesh.sync_workers()
+        e2e_latency = (time.time() - tic) / niter
+        print(f"latency with dirver overhead: {e2e_latency:.3f}")
+
+
+
+        costs = executable.profile_with_dummy_inputs()
+        print(f'costs: {costs}')
+        exit()
+
+
+
+        
         # logging.info(executable.get_hlo_text())
         return (state, executable.get_hlo_text(),
                 executable.auto_sharding_objective)
@@ -273,7 +297,7 @@ class AutoShardingMLPTest(unittest.TestCase):
                                       optimizer_type=self.optimizer_type)
 
     def test_n_layer_mlp_model_parallel(self):
-        num_layers = 6
+        num_layers = 10
         batch_size = 32
         hidden_dim = 256
 
@@ -316,14 +340,15 @@ class AutoShardingMLPTest(unittest.TestCase):
         batch_size = 1
         hidden_dim = 1
 
-
+        num_layers = 60
         input_dim = 20
         hidden_dim = 30
         output_dim = 1
-        batch_size = 50
+        batch_size = 256
 
         # Test on different device meshes
-        mesh_shape = [2, 2]
+        # mesh_shape = [2, 2]
+        mesh_shape = [1, 1]
         device_mesh = self.get_device_mesh(mesh_shape, [1, 1], [1, 0.1])
 
 

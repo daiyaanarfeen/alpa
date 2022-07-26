@@ -136,7 +136,6 @@ def shard_parallel_internal(
     
     profile_hlo_instruction.profile_hlo_instructions(shapes_list)
 
-    logging.info(f'{hlo_module.to_string()}')
     # with open('test.dot', mode='w') as fout:
     #     fout.write(xe.hlo_module_to_dot_graph(hlo_module))
     flop_count = xe.hlo_module_count_flop_dot_conv_only(hlo_module)
