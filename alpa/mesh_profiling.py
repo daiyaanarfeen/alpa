@@ -516,7 +516,8 @@ def profile_operands(device_cluster, cluster_key, cache_filename, operands_info)
                 assert len(operands_shape) == 3, f'{op} has {len(operands_shape)} operands: {operands_shape}'
                 lhs_shape, rhs_shape, out_shape = operands_shape
                 dtype_str = str(lhs_shape.element_type())
-                op_infos_dict[op].add(((lhs_shape.dimensions(), rhs_shape.dimensions(), out_shape.dimensions()), dtype_str))
+#                op_infos_dict[op].add(((lhs_shape.dimensions(), rhs_shape.dimensions(), out_shape.dimensions()), dtype_str))
+                op_infos_dict[op].add((lhs_shape.dimensions()[0], lhs_shape.dimensions()[-1], rhs_shape.dimensions()[-1], dtype_str))
         elif op=='reshape' :
             if op not in op_infos_dict:
                 op_infos_dict[op] = set()
@@ -576,7 +577,8 @@ def profile_operands(device_cluster, cluster_key, cache_filename, operands_info)
             dtype_str = str(lhs_shape.element_type())
             # op_infos_dict[op].add(((lhs_shape.dimensions(), rhs_shape.dimensions(), out_shape.dimensions()), dtype_str))
             
-            res = results[(op, ((lhs_shape.dimensions(), rhs_shape.dimensions(), out_shape.dimensions()), dtype_str))]
+#            res = results[(op, ((lhs_shape.dimensions(), rhs_shape.dimensions(), out_shape.dimensions()), dtype_str))]
+            res = results[(op, (lhs_shape.dimensions()[0], lhs_shape.dimensions()[-1], rhs_shape.dimensions()[-1], str(lhs_shape.element_type())))]
             runtime += res
         elif op=='reshape':
             assert len(operands_shape) == 2, f'{op} has {len(operands_shape)} operands: {operands_shape}'
@@ -632,45 +634,45 @@ def profile_one_hlo_op(backend, local_devices, host_id, num_devices, op_info):
     replica_groups = None
 
     if op_info[0] == "dot":
-        # n, m, k, dtype_str = op_info[1]
-        # dtype = to_np_dtype(dtype_str)
-        # shapes = [((n, k), dtype), ((k, m), dtype), ((n, m), dtype)]
-
-        # def op_func(operands):
-        #     lhs, rhs, _ = operands
-        #     dim_numbers = (((1,), (0,)), ((), ()))
-        #     dim_numbers = xc.make_dot_dimension_numbers(dim_numbers)
-        #     out = ops.DotGeneral(lhs, rhs, dim_numbers)
-        #     operands[-1] = out
-
-        # flop_ct = max(2 * n * m * k, 1)
-        # if dtype_str == "f16":
-        #     work = dot_fp16_work
-        # elif dtype_str == "f32":
-        #     work = dot_fp32_work
-        # else:
-        #     raise ValueError(f"Invalid type: {dtype_str}")
-        # number = bound(int(work / flop_ct), 10, 1 << 12)
-        (lhs_shape, rhs_shape, out_shape), dtype_str = op_info[1]
-
-        if out_shape[0] == lhs_shape[0]:
-            lhs_contrac_dim = 1
-        else:
-            lhs_contrac_dim = 0
-        if out_shape[1] == rhs_shape[0]:
-            rhs_contrac_dim = 1
-        else:
-            rhs_contrac_dim = 0
-        dim_numbers = (((lhs_contrac_dim,), (rhs_contrac_dim,)), ((), ()))
-
+        n, m, k, dtype_str = op_info[1]
         dtype = to_np_dtype(dtype_str)
-        shapes = [(lhs_shape, dtype), (rhs_shape, dtype), (out_shape, dtype)]
+        shapes = [((n, k), dtype), ((k, m), dtype), ((n, m), dtype)]
+
         def op_func(operands):
             lhs, rhs, _ = operands
-            dim_numbers_ = xc.make_dot_dimension_numbers(dim_numbers)
-            out = ops.DotGeneral(lhs, rhs, dim_numbers_)
+            dim_numbers = (((1,), (0,)), ((), ()))
+            dim_numbers = xc.make_dot_dimension_numbers(dim_numbers)
+            out = ops.DotGeneral(lhs, rhs, dim_numbers)
             operands[-1] = out
-        number = 1 << 12
+
+        flop_ct = max(2 * n * m * k, 1)
+        if dtype_str == "float16":
+            work = dot_fp16_work
+        elif dtype_str == "float32":
+            work = dot_fp32_work
+        else:
+            raise ValueError(f"Invalid type: {dtype_str}")
+        number = bound(int(work / flop_ct), 10, 1 << 12)
+#        (lhs_shape, rhs_shape, out_shape), dtype_str = op_info[1]
+#
+#        if out_shape[0] == lhs_shape[0]:
+#            lhs_contrac_dim = 1
+#        else:
+#            lhs_contrac_dim = 0
+#        if out_shape[1] == rhs_shape[0]:
+#            rhs_contrac_dim = 1
+#        else:
+#            rhs_contrac_dim = 0
+#        dim_numbers = (((lhs_contrac_dim,), (rhs_contrac_dim,)), ((), ()))
+#
+#        dtype = to_np_dtype(dtype_str)
+#        shapes = [(lhs_shape, dtype), (rhs_shape, dtype), (out_shape, dtype)]
+#        def op_func(operands):
+#            lhs, rhs, _ = operands
+#            dim_numbers_ = xc.make_dot_dimension_numbers(dim_numbers)
+#            out = ops.DotGeneral(lhs, rhs, dim_numbers_)
+#            operands[-1] = out
+#        number = 1 << 12
     elif op_info[0] == "add":
         shape, dtype_str = op_info[1]
         dtype = to_np_dtype(dtype_str)
