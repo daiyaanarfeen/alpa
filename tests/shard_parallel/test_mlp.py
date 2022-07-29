@@ -167,7 +167,13 @@ def assert_data_parallel_cost(state,
         for weight in params:
             assert_all_replicated(weight, np.prod(device_mesh.shape))
 
-
+            
+def mlp_inference_step(state, batch):
+    out = state.apply_fn(state.params, batch["x"])
+    loss = jnp.mean((out - batch["y"])**2)
+    return out, loss
+  
+  
 class AutoShardingMLPTest(unittest.TestCase):
 
     def setUp(self):
@@ -205,17 +211,17 @@ class AutoShardingMLPTest(unittest.TestCase):
         # def train_step(state, batch):
         #     return state.apply_fn(params, batch["x"])
 
-        @parallelize(method=self.method)
-        def train_step(state, batch):
+        # @parallelize(method=self.method)
+        # def train_step(state, batch):
 
-            def loss_func(params):
-                out = state.apply_fn(params, batch["x"])
-                return jnp.mean((out - batch["y"]))
-                # return jnp.mean((out - batch["y"])**2)
+        #     def loss_func(params):
+        #         out = state.apply_fn(params, batch["x"])
+        #         return jnp.mean((out - batch["y"]))
+        #         # return jnp.mean((out - batch["y"])**2)
 
-            grads = jax.grad(loss_func)(state.params)
-            new_state = state.apply_gradients(grads=grads)
-            return new_state
+        #     grads = jax.grad(loss_func)(state.params)
+        #     new_state = state.apply_gradients(grads=grads)
+        #     return new_state
 
         x = jnp.ones((batch_size, input_dim))
         y = jnp.ones((batch_size, output_dim))
@@ -231,12 +237,29 @@ class AutoShardingMLPTest(unittest.TestCase):
         else:
             raise ValueError(f"Invalid optimizer_type: {self.optimizer_type}")
         state = TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+        
+
+        parallel_inference_step = parallelize(mlp_inference_step,
+                                        method=self.method,
+                                        donate_argnums=())
+
+        executable = parallel_inference_step.get_executable(state, {"x": x, "y": y})
+
+        parallel_out = parallel_inference_step(state, {"x": x, "y": y})
+
+
 
         # JIT compile
-        state = train_step(state, {"x": x, "y": y})
+        # state = train_step(state, {"x": x, "y": y})
+        # train_step(state, {"x": x, "y": y})
+        # out = train_step(state, {"x": x})
+
+
 
         # Get optimized HLO IR
-        executable = train_step.get_last_executable()
+        # executable = train_step.get_last_executable()
+
+
 
         
 
@@ -244,11 +267,15 @@ class AutoShardingMLPTest(unittest.TestCase):
         # Benchmark latency without driver overhead
         niter = 20
         warmup = 5
-        executable = train_step.get_last_executable()
         for i in range(niter):
             print(f"Iteration {i} ...")
-            state = train_step(state, {"x": x, "y": y})
+            # state = train_step(state, {"x": x, "y": y})
+            # train_step(state, {"x": x, "y": y})
+            # out = train_step(state, {"x": x})
+            parallel_out = parallel_inference_step(state, {"x": x, "y": y})
             self.physical_mesh.sync_workers()
+
+        
 
         latencies = executable.get_execution_time_costs()[warmup:]
         print(f'latency without dirver overhead:: {np.mean(latencies)}')
@@ -258,7 +285,8 @@ class AutoShardingMLPTest(unittest.TestCase):
         self.physical_mesh.sync_workers()
         tic = time.time()
         for i in range(niter):
-            state = train_step(state, {"x": x, "y": y})
+            # state = train_step(state, {"x": x, "y": y})
+            parallel_out = parallel_inference_step(state, {"x": x, "y": y})
         self.physical_mesh.sync_workers()
         e2e_latency = (time.time() - tic) / niter
         print(f"latency with dirver overhead: {e2e_latency:.3f}")
