@@ -638,12 +638,23 @@ def profile_one_hlo_op(backend, local_devices, host_id, num_devices, op_info):
         dtype = to_np_dtype(dtype_str)
         shapes = [((n, k), dtype), ((k, m), dtype), ((n, m), dtype)]
 
-        def op_func(operands):
-            lhs, rhs, _ = operands
-            dim_numbers = (((1,), (0,)), ((), ()))
-            dim_numbers = xc.make_dot_dimension_numbers(dim_numbers)
-            out = ops.DotGeneral(lhs, rhs, dim_numbers)
-            operands[-1] = out
+        if m != k:
+            def op_func(operands):
+                lhs, rhs, _ = operands
+                dim_numbers = (((1,), (0,)), ((), ()))
+                dim_numbers = xc.make_dot_dimension_numbers(dim_numbers)
+                out = ops.DotGeneral(lhs, rhs, dim_numbers)
+                operands[-1] = out
+        else:
+            def op_func(operands):
+                dim_numbers = (((1,), (0,)), ((), ()))
+                dim_numbers = xc.make_dot_dimension_numbers(dim_numbers)
+                input = operands[0]
+                for i in range(0):
+                    out = ops.DotGeneral(input, operands[i+1], dim_numbers)
+                    input = out
+#                operands[-1] = out
+            shapes = [((n, k), dtype)] + [((k, m), dtype) for i in range(0)] + [((n, m), dtype)]
 
         flop_ct = max(2 * n * m * k, 1)
         if dtype_str == "float16":
@@ -996,6 +1007,7 @@ def profile_hlo_ops(op_infos, backend, local_devices, host_id, num_devices,
         rank_0_print(host_id, "Save cache...")
         with open(cache_filename, "wb") as cf:
             pickle.dump(cache_dict, cf)
+
 
     return cache_dict
     return np.array(results)
