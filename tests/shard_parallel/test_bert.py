@@ -6,6 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import optim, linen as nn
+from flax.training.train_state import TrainState
+import optax
 
 from alpa import parallelize, ShardParallel, LocalPhysicalDeviceMesh, AutoShardingOption
 from alpa.model.bert_model import (BertConfig, FlaxBertLayerCollection,
@@ -18,12 +20,16 @@ from tests.shard_parallel.test_mlp import (
     assert_replicated_row_partitioned, assert_row_partitioned, is_fully_sharded,
     assert_sharding_zero_stage_3)
 
+def inference_step(state, batch):
+    out = state.apply_fn(state.params, batch["hidden_states"], batch["attention_mask"])
+#    loss = jnp.mean((out - batch["y"])**2)
+    return out
 
 class AutoShardingAttentionTest(unittest.TestCase):
 
     def setUp(self):
-        assert len(jax.local_devices()) >= 4
-        self.physical_mesh = LocalPhysicalDeviceMesh(jax.local_devices()[:4])
+        assert len(jax.local_devices()) >= 1
+        self.physical_mesh = LocalPhysicalDeviceMesh(jax.local_devices()[:1])
         self.as_option = AutoShardingOption()
 
     def get_device_mesh(self, shape, mesh_alpha, mesh_beta):
@@ -32,22 +38,22 @@ class AutoShardingAttentionTest(unittest.TestCase):
     def run_bert_layers(self, batch_size, seq_len, num_layers, hidden_size,
                         num_heads, deterministic, use_remat, device_mesh):
 
-        @parallelize(method=ShardParallel(devices=device_mesh,
-                                          auto_sharding_option=self.as_option))
-        def train_step(optimizer, batch, deterministic, apply_fn):
-
-            def loss_func(params):
-                rngs = {"dropout": batch["rng"]}
-                out = apply_fn(params,
-                               batch["hidden_states"],
-                               batch["attention_mask"],
-                               deterministic,
-                               rngs=rngs)[0]
-                return jnp.mean((out - batch["label"])**2)
-
-            grad = jax.grad(loss_func)(optimizer.target)
-            new_optimizer = optimizer.apply_gradient(grad)
-            return new_optimizer
+#        @parallelize(method=ShardParallel(devices=device_mesh,
+#                                          auto_sharding_option=self.as_option))
+#        def train_step(optimizer, batch, deterministic, apply_fn):
+#
+#            def loss_func(params):
+#                rngs = {"dropout": batch["rng"]}
+#                out = apply_fn(params,
+#                               batch["hidden_states"],
+#                               batch["attention_mask"],
+#                               deterministic,
+#                               rngs=rngs)[0]
+#                return jnp.mean((out - batch["label"])**2)
+#
+#            grad = jax.grad(loss_func)(optimizer.target)
+#            new_optimizer = optimizer.apply_gradient(grad)
+#            return new_optimizer
 
         # Init model and optimizer
         hidden_states = jnp.ones((batch_size, seq_len, hidden_size),
@@ -63,21 +69,36 @@ class AutoShardingAttentionTest(unittest.TestCase):
                        gradient_checkpointing=use_remat))
         rngkey = jax.random.PRNGKey(0)
         params = model.init(rngkey, hidden_states, attention_mask)
-        optimizer = optim.Adam(1e-2).create(params)
+        optimizer = optax.adam(learning_rate=1e-2)
 
-        # JIT compile
-        optimizer = train_step(
-            optimizer, {
-                "hidden_states": hidden_states,
-                "attention_mask": attention_mask,
-                "label": label,
-                "rng": rngkey
-            }, deterministic, model.apply)
+        state = TrainState.create(apply_fn=model.apply, params=params, tx=optimizer)
 
-        # Get optimized HLO IR
-        executable = train_step.get_last_executable()
-        return (optimizer, executable.get_hlo_text(),
-                executable.auto_sharding_objective)
+        method = ShardParallel(auto_sharding_option=AutoShardingOption())
+        parallel_inference_step = parallelize(inference_step,
+                                        method=method,
+                                        donate_argnums=())
+
+        executable = parallel_inference_step.get_executable(state, {"hidden_states": hidden_states, "attention_mask": attention_mask, "label": label})
+
+        parallel_out = parallel_inference_step(state, {"hidden_states": hidden_states, "attention_mask": attention_mask, "label": label})
+
+        costs = executable.profile_with_dummy_inputs()
+        print(f'costs: {costs}')
+        exit()
+
+#        # JIT compile
+#        optimizer = train_step(
+#            optimizer, {
+#                "hidden_states": hidden_states,
+#                "attention_mask": attention_mask,
+#                "label": label,
+#                "rng": rngkey
+#            }, deterministic, model.apply)
+#
+#        # Get optimized HLO IR
+#        executable = train_step.get_last_executable()
+#        return (optimizer, executable.get_hlo_text(),
+#                executable.auto_sharding_objective)
 
     def run_bert_mlm(self, batch_size, seq_len, num_layers, hidden_size,
                      num_heads, vocab_size, deterministic, device_mesh):
@@ -219,7 +240,8 @@ class AutoShardingAttentionTest(unittest.TestCase):
         use_remat = False
 
         # Test on different logical mesh shapes
-        mesh_shape = [2, 2]
+#        mesh_shape = [2, 2]
+        mesh_shape = [1, 1]
         device_mesh = self.get_device_mesh(mesh_shape, [2, 2], [1, 0.1])
         optimizer, hlo_ir, objective = self.run_bert_layers(
             batch_size, seq_len, num_layers, hidden_size, num_heads,
@@ -607,27 +629,27 @@ def suite():
     def add(name):
         suite.addTest(AutoShardingAttentionTest(name))
 
-    add("test_bert_layer_data_parallel")
-    add("test_bert_layer_model_parallel")
+#    add("test_bert_layer_data_parallel")
+#    add("test_bert_layer_model_parallel")
     add("test_bert_layer_2d_mesh")
-    add("test_bert_layer_force_batch_dim_mapping")
-
-    add("test_embedding_2d_mesh")
-
-    add("test_bert_mlm_data_parallel")
-    add("test_bert_mlm_model_parallel")
-    add("test_bert_mlm_2d_mesh")
-
-    add("test_bert_layer_data_parallel_reduce_scatter")
-    add("test_bert_layer_model_parallel_reduce_scatter")
-    add("test_bert_layer_2d_mesh_reduce_scatter")
-
-    add("test_bert_mlm_data_parallel_reduce_scatter")
-    add("test_bert_mlm_model_parallel_reduce_scatter")
-    add("test_bert_mlm_2d_mesh_reduce_scatter")
-    add("test_bert_mlm_data_parallel_reduce_scatter_zero_3")
-
-    add("test_bert_layer_model_parallel_remat")
+#    add("test_bert_layer_force_batch_dim_mapping")
+#
+#    add("test_embedding_2d_mesh")
+#
+#    add("test_bert_mlm_data_parallel")
+#    add("test_bert_mlm_model_parallel")
+#    add("test_bert_mlm_2d_mesh")
+#
+#    add("test_bert_layer_data_parallel_reduce_scatter")
+#    add("test_bert_layer_model_parallel_reduce_scatter")
+#    add("test_bert_layer_2d_mesh_reduce_scatter")
+#
+#    add("test_bert_mlm_data_parallel_reduce_scatter")
+#    add("test_bert_mlm_model_parallel_reduce_scatter")
+#    add("test_bert_mlm_2d_mesh_reduce_scatter")
+#    add("test_bert_mlm_data_parallel_reduce_scatter_zero_3")
+#
+#    add("test_bert_layer_model_parallel_remat")
 
     return suite
 
