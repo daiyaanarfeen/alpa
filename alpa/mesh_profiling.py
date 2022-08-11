@@ -633,7 +633,23 @@ def profile_one_hlo_op(backend, local_devices, host_id, num_devices, op_info):
     comm_work = 1 << 32
     replica_groups = None
 
-    if op_info[0] == "dot":
+    if op_info[0] == "dot" and True:
+        import ipdb; ipdb.set_trace()
+        # CONV TEST
+        dtype = to_np_dtype("float32")
+        shapes = [((1, 3, 32, 32), dtype), ((128, 3, 3, 3), dtype), ((1, 128, 32, 32), dtype)]
+        def op_func(operands):
+            lhs, rhs, _ = operands
+            strides = [1, 1]
+            padding = [(1, 1), (1, 1)]
+            lhs_dilation = [1, 1]
+            rhs_dilation = [1, 1]
+            dim_numbers = xc.make_convolution_dimension_numbers(('NCHW', 'OIHW', 'NCHW'), 2)
+            out = ops.ConvGeneralDilated(lhs, rhs, strides, padding, lhs_dilation, rhs_dilation, dim_numbers, 1, 1)
+            operands[-1] = out
+        work = dot_fp32_work
+        number = 4096
+    elif op_info[0] == "dot":
         n, m, k, dtype_str = op_info[1]
         dtype = to_np_dtype(dtype_str)
         shapes = [((n, k), dtype), ((k, m), dtype), ((n, m), dtype)]
