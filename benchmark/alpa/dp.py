@@ -17,7 +17,7 @@ def dp_h(num_layers, num_devices, num_microbatches, submesh_choices,
         all_possible_stage_costs), "no solution in auto stage construction."
     print(f"num of possible stage costs: {len(all_possible_stage_costs)} max: {np.max(all_possible_stage_costs)}")
     for max_stage_cost in all_possible_stage_costs:
-        print(max_stage_cost)
+
         if max_stage_cost * num_microbatches >= best_cost:
             break
         if max_stage_cost - last_max_stage_cost < gap:
@@ -26,11 +26,11 @@ def dp_h(num_layers, num_devices, num_microbatches, submesh_choices,
                                  submesh_choices, num_autosharding_configs,
                                  compute_cost, max_n_succ_stages,
                                  max_stage_cost)
+        # print(f"max stage cost: {max_stage_cost} cost: {cost} solution: {solution}")
         if cost < best_cost:
             best_cost = cost
             best_solution = solution
         last_max_stage_cost = max_stage_cost
-
 
     return best_cost, best_solution
 
@@ -54,6 +54,8 @@ def dp_impl_h(num_layers, num_devices, num_microbatches, submesh_choices,
                        dtype=np.int32)
     f[0, num_layers, 0, 0] = 0
     for s in range(1, num_layers + 1):  # pylint: disable=too-many-nested-blocks
+        if s > 3:
+            break
         for i in range(num_layers - 1, -1, -1):
             for j in range(num_layers, i, -1):
 
@@ -71,10 +73,14 @@ def dp_impl_h(num_layers, num_devices, num_microbatches, submesh_choices,
                                     # TODO(zhuohan): This level of for loop is not
                                     #   necessary. It can be optimized by sorting
                                     #   the logical mesh shapes.
+                                    # if max_stage_cost > 0.9:
+                                    #     print(f'\tnum_stage: {s} start: {i} end: {j} gpu1: {num_gpu_1} gpu2: {num_gpu_2} used_gpu: {gpu_id+1} submesh: {submesh}')
+
                                     for n_config in range(num_autosharding_configs):
                                         if s - 1 <= max_n_succ_stages[gpu_id, i, j - 1, m, n_config]:
                                             stage_cost = compute_cost[gpu_id, i, j - 1, m, n_config]
-                                            
+                                            # if max_stage_cost > 0.9:
+                                            #     print(f"\t\tstage cost: {stage_cost}")
                                             if gpu_id == 0:
                                                 new_cost = f[s - 1, j, num_gpu_1-n_submesh_devices, num_gpu_2] + stage_cost
                                             else:
@@ -83,6 +89,8 @@ def dp_impl_h(num_layers, num_devices, num_microbatches, submesh_choices,
                                             if (stage_cost <= max_stage_cost and
                                                     new_cost < f[s, i, num_gpu_1, num_gpu_2]):
                                                 f[s, i, num_gpu_1, num_gpu_2] = new_cost
+                                                if max_stage_cost > 0.9:
+                                                    print(f"\t\tnew cost: {new_cost}")
                                                 if gpu_id == 0:
                                                     f_stage_max[s, i, num_gpu_1, num_gpu_2] = max(
                                                         f_stage_max[s - 1, j,
@@ -95,6 +103,8 @@ def dp_impl_h(num_layers, num_devices, num_microbatches, submesh_choices,
                                                         stage_cost)
                                                     
                                                 f_argmin[s, i, num_gpu_1, num_gpu_2] = (gpu_id, j, m, n_config)
+                                        # else:
+                                        #     print(f"\t\tinsufficient succ stages: {max_n_succ_stages[gpu_id, i, j - 1, m, n_config]}")
 
 
     best_s = -1
@@ -107,20 +117,20 @@ def dp_impl_h(num_layers, num_devices, num_microbatches, submesh_choices,
     if np.isinf(best_total_cost):
         return np.inf, None
     
-    total_cost = f[best_s, 0, num_devices, num_devices] + (
-        num_microbatches - 1) * f_stage_max[best_s, 0, num_devices, num_devices]
+    total_cost = f[best_s, 0, num_devices[0], num_devices[1]] + (
+        num_microbatches - 1) * f_stage_max[best_s, 0, num_devices[0], num_devices[1]]
 
     current_s = best_s
     current_layer = 0
     current_devices = num_devices
 
     res = []
-    while current_s > 0 and current_layer < num_layers and current_devices[0] > 0 and current_devices[1]:
+    while current_s > 0 and current_layer < num_layers and current_devices[0] + current_devices[1] > 0:
         used_gpu_id, next_start_layer, submesh_choice, autosharding_choice = (
             f_argmin[current_s, current_layer, current_devices[0], current_devices[1]])
         assert next_start_layer != -1 and current_devices[0] != -1 and current_devices[1] != -1
         res.append(((current_layer, next_start_layer), submesh_choice,
-                    autosharding_choice))
+                    autosharding_choice, used_gpu_id))
         current_s -= 1
         current_layer = next_start_layer
         current_devices[used_gpu_id] -= np.prod(np.array(submesh_choices[submesh_choice]))
@@ -131,9 +141,10 @@ def dp_impl_h(num_layers, num_devices, num_microbatches, submesh_choices,
     return total_cost, res
 
 if __name__ == '__main__':
-    profile = np.load('./compute-cost-2022-08-23-05-16-16.npy')
+    profile = np.load('./compute-cost-dgx.npy')
     compute_cost = profile[0, :, :, :, :]
     max_n_succ_stages = profile[1, :, :, :, :]  
+    is_profiled = profile[2, :, :, :, :] 
     print(compute_cost.shape)
 
 
@@ -141,26 +152,38 @@ if __name__ == '__main__':
     # num_layers = 16
     # num_devices = 8
     # num_micro_batches = 24
-    # submesh_choices = ((1,1), (1,2))
-    # num_autosharding_configs = 3
+    # submesh_choices = ((1,1), (1,2), (1,4), (1,8))
+    # num_autosharding_configs = len(submesh_choices) + 1
 
     # compute_cost = compute_cost[:, :, :len(submesh_choices), :len(submesh_choices)+1]
     # max_n_succ_stages = max_n_succ_stages[:, :, :len(submesh_choices), :len(submesh_choices)+1]
 
-    # _, solution = dp(num_layers, num_devices,
+    # cost, solution = dp(num_layers, num_devices,
     #                 num_micro_batches, submesh_choices,
     #                 num_autosharding_configs, compute_cost,
     #                 max_n_succ_stages)
 
 
-
-
     """heterogeneous"""
+    profile_dgx = np.load('./compute-cost-dgx.npy')
+    compute_cost_dgx = profile_dgx[0, :, :, :, :]
+    max_n_succ_stages_dgx = profile_dgx[1, :, :, :, :]  
+    is_profiled_dgx = profile_dgx[2, :, :, :, :] 
+
     num_layers = 16
-    num_devices = [1,1]
+    num_devices = [4,4]
     num_micro_batches = 24
-    submesh_choices = ((1,1))
+    submesh_choices = ((1,1), (1,2), (1,4))
     num_autosharding_configs = len(submesh_choices) + 1
+
+
+    # print(compute_cost[0, 9, 0, :])
+    # print(compute_cost[10, 15, 0, :])
+    # print(max_n_succ_stages[0, 9, 0, :])
+    # print(max_n_succ_stages[10, 15, 0, :])
+    # print(is_profiled[0, 9, 0, :])
+    # print(is_profiled[10, 15, 0, :])
+    # exit()
 
     compute_cost_h = np.zeros((2, compute_cost.shape[0], compute_cost.shape[1], len(submesh_choices), len(submesh_choices)+1))
     compute_cost_h[0] = compute_cost[:, :, :len(submesh_choices), :len(submesh_choices)+1]
@@ -170,13 +193,13 @@ if __name__ == '__main__':
     max_n_succ_stages_h[1] = max_n_succ_stages[:, :, :len(submesh_choices), :len(submesh_choices)+1]
 
 
-    _, solution = dp_h(num_layers, num_devices,
+    cost, solution = dp_h(num_layers, num_devices,
                     num_micro_batches, submesh_choices,
                     num_autosharding_configs, compute_cost_h,
                     max_n_succ_stages_h)
 
 
-
+    print(f'best_cost: {cost} best_solution: {solution}')
 
 
     assert solution is not None, "no solution in auto stage construction."
