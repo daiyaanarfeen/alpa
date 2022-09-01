@@ -25,7 +25,7 @@ use_remat = True
 auto_stage_option = {
     "submesh_physical_shape_space": "small_power_of_two",
     "submesh_logical_shape_space": "single_node_model_parallel",
-    "stage_imbalance_tolerance": 0.25,
+    "stage_imbalance_tolerance": 0.75,
     "use_hlo_cost_model": False,
     "profiling_database_filename": None,
 }
@@ -136,9 +136,9 @@ grid_search_auto_suite = {  # key = the number of gpus, value = a list of cases
     1: get_search_cases("250M", 1536, [24, 32]),
     2: get_search_cases("500M", 1536, [24, 32]),
     4: get_search_cases("1B", 1536, [24, 32]),
-    8: get_search_cases("2B", 1536, [24, 32]),
+#    8: get_search_cases("2B", 1536, [24, 32]),
     16: get_search_cases("4B", 1536, [24, 32]),
     32: (get_search_cases("6.8B", 1520, [38]) +
      get_search_cases("6.8B", 1512, [42])),
-    64: get_search_cases("13B", 1520, [38]),
+    8: get_search_cases("13B", 1520, [38]),
 }

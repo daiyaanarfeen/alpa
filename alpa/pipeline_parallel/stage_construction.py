@@ -314,8 +314,8 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
     tolerance = auto_stage_option.stage_imbalance_tolerance
     for start in tqdm.tqdm(range(0, num_layers)):
         for end in tqdm.tqdm(range(start, num_layers), leave=False):
-            if is_full_mesh and not (start == 0 and end == num_layers - 1):
-                continue
+#            if is_full_mesh and not (start == 0 and end == num_layers - 1):
+#                continue
             flops_ratio = (
                 layer_flops_prefix_sum[end + 1] - layer_flops_prefix_sum[start]
                 + layer_flops_prefix_sum[2 * num_layers - start] -
@@ -334,8 +334,8 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
                 layers, layer_indices, donation_mapping,
                 global_outvars, stage_name, end - start,
                 list(selected_apply_grad_layers), apply_grad_global_info)
-            if is_full_mesh:
-                intermediate_vars = []
+#            if is_full_mesh:
+#                intermediate_vars = []
             for config_idx, autosharding_config in enumerate(
                     autosharding_configs):
                 if autosharding_config is not None:
@@ -362,6 +362,10 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
         return compute_cost, max_n_succ_stages, is_profiled
     timers("stage-construction-compilation").suspend()
 
+    stages = sorted(stages, key=lambda x: x[0])
+    chunks = 5
+    chunk_idx = 0
+    stages = stages[chunk_idx * len(stages) // chunks: min((chunk_idx+1) * len(stages) // 5, len(stages))]
     print("- Profile all stages")
     # shape of compute_cost and max_n_succ_stages:
     # (num_layers, num_layers, num_autosharding_configs)
@@ -498,6 +502,7 @@ def get_compute_cost(
     last_compute_cost_file_name = compute_cost_file_name
     print(f"Compute cost saved to: {compute_cost_file_name}")
     print("-" * 70)
+    import ipdb; ipdb.set_trace()
     return compute_cost, max_n_succ_stages
 
 
