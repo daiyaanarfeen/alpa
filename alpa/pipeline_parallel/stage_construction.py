@@ -366,6 +366,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
     chunks = 5
     chunk_idx = 0
     stages = stages[chunk_idx * len(stages) // chunks: min((chunk_idx+1) * len(stages) // 5, len(stages))]
+    compiled_outputs = compiled_outputs[chunk_idx * len(compiled_outputs) // chunks: min((chunk_idx+1) * len(compiled_outputs) // 5, len(compiled_outputs))]
     print("- Profile all stages")
     # shape of compute_cost and max_n_succ_stages:
     # (num_layers, num_layers, num_autosharding_configs)
