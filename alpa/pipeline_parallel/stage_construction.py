@@ -320,9 +320,9 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
                 layer_flops_prefix_sum[end + 1] - layer_flops_prefix_sum[start]
                 + layer_flops_prefix_sum[2 * num_layers - start] -
                 layer_flops_prefix_sum[2 * num_layers - end - 1]) / tot_flops
-            if (computation_source_ratio > flops_ratio * (1 + tolerance) or
-                    computation_source_ratio < flops_ratio / (1 + tolerance)):
-                continue
+#            if (computation_source_ratio > flops_ratio * (1 + tolerance) or
+#                    computation_source_ratio < flops_ratio / (1 + tolerance)):
+#                continue
             layer_indices = (
                 indices[start:end + 1] +
                 indices[2 * num_layers - end - 1:2 * num_layers - start])

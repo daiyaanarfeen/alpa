@@ -28,6 +28,7 @@ auto_stage_option = {
     "stage_imbalance_tolerance": 0.75,
     "use_hlo_cost_model": False,
     "profiling_database_filename": None,
+    "cached_compute_cost": "v100_fullbatch.npy"
 }
 
 
