@@ -1,3 +1,4 @@
+from http.server import executable
 from pathlib import Path
 import numpy as np
 import json
@@ -8,6 +9,10 @@ import os.path
 import time
 import multiprocessing
 import pickle
+import cvxpy as cp
+import numpy as np
+import cylp
+from mip_cvxpy import PYTHON_MIP
 
 def slice_cluster(cluster, homogeneous=True):
     single = {cname: [] for cname in cluster}
@@ -28,13 +33,13 @@ def slice_cluster(cluster, homogeneous=True):
     return res
     
 
-
-
 if __name__ == '__main__':
     gpu_name = ['rtx', 'a100']
-    cluster = {gpu_name[0]:8, gpu_name[1]:8}
-    job_list = ['wresnet-6.5b', 'gpt-6.7b']
-    num_micro_batches_dict = {job_list[0]: 38, job_list[1]: 128}
+    cluster = {gpu_name[0]:136, gpu_name[1]:32}
+    job_list = ['wresnet-6.5b', 'wresnet-2b', 'gpt-6.7b', 'gpt-1.3b', 'gpt-15b']
+    # job_list = ['wresnet-6.5b', 'wresnet-6.5b']
+    num_micro_batches_dict = {'wresnet-6.5b': 38, 'wresnet-2b': 24, 'gpt-6.7b': 128, 'gpt-1.3b': 128, 'gpt-15b':128}
+    # num_micro_batches_dict = {job_list[0]: 38}
     batch_size = 1536
 
     """ spec """
@@ -61,6 +66,7 @@ if __name__ == '__main__':
     """ prepare propfile"""
     compute_cost_dict = {}
     max_n_succ_stages_dict = {}
+    is_profiled_dict = {}
     for job in job_list:
         profile_1 = np.load(f'./compute-cost-{job}-{gpu_name[0]}.npy')
         compute_cost_1 = profile_1[0, :, :, :, :]
@@ -78,19 +84,33 @@ if __name__ == '__main__':
         max_n_succ_stages_h = np.zeros((2, max_n_succ_stages_1.shape[0], max_n_succ_stages_1.shape[1], max_n_succ_stages_1.shape[2], max_n_succ_stages_1.shape[3]))
         max_n_succ_stages_h[0, :] = max_n_succ_stages_1
         max_n_succ_stages_h[1, :] = max_n_succ_stages_2
+        is_profiled_h = np.zeros(compute_cost_h.shape)
+        is_profiled_h[0,:] = is_profiled_1
+        is_profiled_h[1,:] = is_profiled_2
 
         compute_cost_dict[job] = compute_cost_h
         max_n_succ_stages_dict[job] = max_n_succ_stages_h
+        is_profiled_dict[job] = is_profiled_h
 
 
-    """homogeneous allocation"""
-    sub_clusters = slice_cluster(cluster, homogeneous=True)
-    # print(valid_allocations_homo)
+    """ verify the correctness of the profile"""
+    print("### The following profiles are missing")
+    for job_id in range(len(job_list)):
+        for gpu_id in range(len(gpu_name)):
+            is_profiled = is_profiled_dict[job_list[job_id]][gpu_id]
+            for num_gpu in range(4):
+                num_config = num_gpu + 2
+                for i in range(is_profiled.shape[0]):
+                    for j in range(i, is_profiled.shape[0]):
+                        if 0 in is_profiled[i,j,num_gpu, :num_config]:
+                            print(f'{job_list[job_id]} {gpu_name[gpu_id]} {i} {j} {num_gpu} {num_config} {is_profiled[i,j,num_gpu, :num_config]}')
+                        # assert 0 not in is_profiled[i,j,num_gpu, :num_config], f'{job_list[job_id]} {gpu_name[gpu_id]} {i} {j} {num_gpu} {num_config} {is_profiled[i,j,num_gpu, :num_config]}'
+    print('')
 
+    """ get throughput matrix """
+    sub_clusters = slice_cluster(cluster, homogeneous=False)
     alloc_list = list(itertools.product(*[job_list, sub_clusters]))
-    # print(valid_alloc)
 
-    # get throughput matrix
     throughput_cache_path = f'./throughput_matrix.txt'
     if Path(throughput_cache_path).is_file():
         throughput_dict = json.load(open(throughput_cache_path))
@@ -102,87 +122,180 @@ if __name__ == '__main__':
         for c in sub_clusters:
             key = f'{c[0]}_{gpu_name[0]}_{c[1]}_{gpu_name[1]}'
             if key not in throughput_dict[jn]:
-                throughput_dict[jn][key] = -1
+                throughput_dict[jn][key] = None
 
-    def get_throughput(job, cluster, send_end):
-        lines = []
-        print(f"------ Start {job}, {cluster} ------")
-        lines.append(f"------ Start {job}, {cluster} ------\n")
-        start = time.time()
-        compute_cost_h = compute_cost_dict[job]
-        max_n_succ_stages_h = max_n_succ_stages_dict[job]
-        num_layers = compute_cost_h.shape[1]
-        num_micro_batches = num_micro_batches_dict[job]
-        iter_time, solution, f, f_stage_max, f_argmin = dp_hete(num_layers, cluster,
-                    num_micro_batches, submesh_choices,
-                    num_autosharding_configs, compute_cost_h,
-                    max_n_succ_stages_h)
-        end = time.time()
-        lines.append(f'dp search time: {end-start}\n')
+    # def get_throughput(job, cluster, send_end):
+    #     lines = []
+    #     print(f"------ Start {job}, {cluster} ------")
+    #     lines.append(f"------ Start {job}, {cluster} ------\n")
+    #     start = time.time()
+    #     compute_cost_h = compute_cost_dict[job]
+    #     max_n_succ_stages_h = max_n_succ_stages_dict[job]
+    #     num_layers = compute_cost_h.shape[1]
+    #     num_micro_batches = num_micro_batches_dict[job]
+    #     iter_time, solution, f, f_stage_max, f_argmin = dp_hete(num_layers, cluster,
+    #                 num_micro_batches, submesh_choices,
+    #                 num_autosharding_configs, compute_cost_h,
+    #                 max_n_succ_stages_h)
+    #     end = time.time()
+    #     lines.append(f'dp search time: {end-start}\n')
 
         
-        if solution is None:
-            lines.append('no solution found\n')
-            res = (job, cluster, np.inf)
-        else:
-            gpu_used_1 = 0
-            gpu_used_2 = 0
-            lines.append('best solution:\n')
+    #     if solution is None:
+    #         lines.append('no solution found\n')
+    #         res = (job, cluster, np.inf)
+    #     else:
+    #         gpu_used_1 = 0
+    #         gpu_used_2 = 0
+    #         lines.append('best solution:\n')
 
-            for i, s in enumerate(solution):
-                lines.append(f'stage: {i}, solution: {s}: layers: {s[0][0]}-{s[0][1]-1}, shard: ({autosharding_configs[s[1]][s[2]][0].shape}, {autosharding_configs[s[1]][s[2]][1]}), gpu: {gpu_name[s[3]]}, time: {compute_cost_h[s[3], s[0][0], s[0][1]-1, s[1], s[2]]}\n')
-                if s[3]==0:
-                    gpu_used_1 += np.prod(submesh_choices[s[1]])
-                else:
-                    gpu_used_2 += np.prod(submesh_choices[s[1]])
-            throughput = 1/iter_time
-            lines.append(f'used {gpu_used_1} {gpu_name[0]} + {gpu_used_2} {gpu_name[1]}\n')
-            lines.append(f'best_iter_time: {iter_time}, throughput: {throughput}\n')
-            res = (job, cluster, iter_time)
+    #         for i, s in enumerate(solution):
+    #             lines.append(f'stage: {i}, solution: {s}: layers: {s[0][0]}-{s[0][1]-1}, shard: ({autosharding_configs[s[1]][s[2]][0].shape}, {autosharding_configs[s[1]][s[2]][1]}), gpu: {gpu_name[s[3]]}, time: {compute_cost_h[s[3], s[0][0], s[0][1]-1, s[1], s[2]]}\n')
+    #             if s[3]==0:
+    #                 gpu_used_1 += np.prod(submesh_choices[s[1]])
+    #             else:
+    #                 gpu_used_2 += np.prod(submesh_choices[s[1]])
+    #         throughput = 1/iter_time
+    #         lines.append(f'used {gpu_used_1} {gpu_name[0]} + {gpu_used_2} {gpu_name[1]}\n')
+    #         lines.append(f'best_iter_time: {iter_time}, throughput: {throughput}\n')
+    #         res = (job, cluster, iter_time)
 
-        with open(f'./logs_{job}/{cluster[0]}_{gpu_name[0]}_{cluster[1]}_{gpu_name[1]}.txt', 'a') as f:
-            f.writelines(lines)
-        print(f"------ Start {job}, {cluster} ------")
-        send_end.send(res)
+    #     with open(f'./logs_{job}/{cluster[0]}_{gpu_name[0]}_{cluster[1]}_{gpu_name[1]}.txt', 'a') as f:
+    #         f.writelines(lines)
+    #     print(f"------ End {job}, {cluster} ------")
+    #     send_end.send(res)
 
 
-    for job in job_list:
-        log_dir = f'./logs_{job}/'
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+    # for job in job_list:
+    #     log_dir = f'./logs_{job}/'
+    #     if not os.path.exists(log_dir):
+    #         os.makedirs(log_dir)
     
-    processes = []
-    pipe_list = []
-    for (job, c) in alloc_list:
-        key = f'{c[0]}_{gpu_name[0]}_{c[1]}_{gpu_name[1]}'
-        if throughput_dict[job][key] != -1:
-            print(f"{job}, {key} cache hit")
-            continue
-        recv_end, send_end = multiprocessing.Pipe(False)
-        p = multiprocessing.Process(target=get_throughput, args=(job, c, send_end))
-        processes.append(p)
-        pipe_list.append(recv_end)
-        p.start()
+    # # print(alloc_list)
 
-    for i in range(len(processes)):
-        (job, c, time) = pipe_list[i].recv()
-        key = f'{c[0]}_{gpu_name[0]}_{c[1]}_{gpu_name[1]}'
-        throughput_dict[job][key] =time
-        processes[i].join()
+    # processes = []
+    # pipe_list = []
+    # for (job, c) in alloc_list:
+    #     key = f'{c[0]}_{gpu_name[0]}_{c[1]}_{gpu_name[1]}'
+    #     if throughput_dict[job][key] is not None:
+    #         print(f"{job}, {key} cache hit")
+    #         continue
+    #     recv_end, send_end = multiprocessing.Pipe(False)
+    #     p = multiprocessing.Process(target=get_throughput, args=(job, c, send_end))
+    #     processes.append(p)
+    #     pipe_list.append(recv_end)
+    #     p.start()
 
-    print(throughput_dict)
+    # for i in range(len(processes)):
+    #     try:
+    #         (job, c, time) = pipe_list[i].recv()
+    #     except:
+    #         print(f'{i} process failed')
+    #         continue
+    #     key = f'{c[0]}_{gpu_name[0]}_{c[1]}_{gpu_name[1]}'
+    #     throughput_dict[job][key] =time
+    #     processes[i].join()
 
-    with open(throughput_cache_path, 'w') as file:
-        file.write(json.dumps(throughput_dict))
+    # # print(throughput_dict)
+
+    # with open(throughput_cache_path, 'w') as file:
+    #     file.write(json.dumps(throughput_dict))
 
 
+    # exit()
 
-
+    """ ############# solve ############"""
+    def allocate(job_list, throughput_dict, cluster_list):
+        def get_base_throghput(job, throughput_dict, num_gpu):
+            i = 1
+            while i <= num_gpu:
+                key = f'{i}_{gpu_name[0]}_0_{gpu_name[1]}'
+                if throughput_dict[job][key] != np.Infinity:
+                    # print(f'{job} min gpu: {i}')
+                    return (1/throughput_dict[job][key]) / i
+                i = i * 2 if i <= 8 else i + 8
         
 
 
+        x = cp.Variable((len(job_list), len(cluster_list)), boolean=True)
+        t = np.zeros((len(job_list), len(cluster_list)), dtype=float)
+        t_real = np.zeros((len(job_list), len(cluster_list)), dtype=float)
+        for i in range(len(job_list)):
+            for j in range(len(cluster_list)):
+                c = cluster_list[j]
+                key = f'{c[0]}_{gpu_name[0]}_{c[1]}_{gpu_name[1]}'
+                if throughput_dict[job_list[i]][key] is None:
+                    t[i][j] = 0
+                    t_real[i][j] = 0
+                else:
+                    # t[i][j] = (1 / throughput_dict[job_list[i]][key]) / get_base_throghput(job, throughput_dict, cluster[gpu_name[0]])
+                    # t[i][j] = (1 / throughput_dict[job_list[i]][key])
+                    fair_key = f'24_{gpu_name[0]}_4_{gpu_name[1]}'
+                    t_real[i][j] = (1 / throughput_dict[job_list[i]][key])
+                    # t[i][j] = (1 / throughput_dict[job_list[i]][key]) / (c[0] + c[1])
+                    t[i][j] = (1 / throughput_dict[job_list[i]][key]) / (1/throughput_dict[job_list[i]][fair_key])
+        # print('throughput matrix:')
+        # print(t)
+        # print('')
+
+        sum_throughput = cp.sum(cp.multiply(x, t))
+        obj = cp.Maximize(sum_throughput)
+
+        constraints = [cp.sum(x, axis=1, keepdims=True) <= 1]
+
+        gpu_0 = []
+        gpu_1 = []
+        for i in range(len(job_list)):
+            gpu_0.append([c[0] for c in cluster_list])
+            gpu_1.append([c[1] for c in cluster_list])
+        gpu_0 = np.array(gpu_0)
+        gpu_1 = np.array(gpu_1)
+        gpu_used_0 = cp.sum(cp.multiply(x, gpu_0))
+        gpu_used_1 = cp.sum(cp.multiply(x, gpu_1))
+
+        constraints.append(gpu_used_0 <= cluster[gpu_name[0]])
+        constraints.append(gpu_used_1 <= cluster[gpu_name[1]])
+
+        prob = cp.Problem(obj, constraints)
+        # print(prob)
+        # print('')
+
+        result = prob.solve(solver=PYTHON_MIP())
+
+        if prob.status != "optimal":
+            print('WARNING: Allocation returned by policy not optimal!')
+        elif x.value is None:
+            print('WARNING: No allocation possible with provided SLOs!')
+        else:
+            value = (x.value)
+            # print(value)
+            print('allocation:')
+            for i in range(len(job_list)):
+                allocated = False
+                for j in range(len(cluster_list)):
+                    if value[i,j] == 1:
+                        print(f'{job_list[i]}, {cluster_list[j]}, througput: {t[i,j]}')
+                        allocated = True
+                        # break
+                if not allocated:
+                    print(f'{job_list[i]}, None, througput: 0')
+            print(f'sum throughput: {prob.value}')
+    
+    # job_list = ['wresnet-6.5b', 'gpt-6.7b', 'wresnet-6.5b', 'gpt-6.7b']
+    # job_list = ['wresnet-6.5b', 'wresnet-6.5b']
+    job_list = ['wresnet-6.5b', 'wresnet-2b', 'gpt-6.7b', 'gpt-1.3b', 'gpt-15b']
 
 
+    # homogeneous allocation
+    print("homogeneous allocation")
+    sub_clusters_homo = slice_cluster(cluster, homogeneous=True)
+    print(sub_clusters_homo)
+    allocate(job_list, throughput_dict, sub_clusters_homo)
+    print('')
+    # heterogeneous allocation
+    print("heterogeneous allocation")
+    sub_clusters_hete = slice_cluster(cluster, homogeneous=False)
+    print(sub_clusters_hete)
+    allocate(job_list, throughput_dict, sub_clusters_hete)
 
-
-    """heterogeneosu allocation"""
+    
