@@ -313,7 +313,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
     is_full_mesh = computation_source_ratio == 1
     tolerance = auto_stage_option.stage_imbalance_tolerance
     for start in tqdm.tqdm(range(0, num_layers)):
-        for end in tqdm.tqdm(range(start, num_layers), leave=False):
+        for end in tqdm.tqdm(range(start, min(start+1, num_layers)), leave=False):
 #            if is_full_mesh and not (start == 0 and end == num_layers - 1):
 #                continue
             flops_ratio = (
@@ -364,7 +364,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
 
     stages = sorted(stages, key=lambda x: x[0])
     chunks = 10
-    chunk_idx = 1
+    chunk_idx = 0
     stages = stages[chunk_idx * len(stages) // chunks: min((chunk_idx+1) * len(stages) // chunks, len(stages))]
     compiled_outputs = compiled_outputs[chunk_idx * len(compiled_outputs) // chunks: min((chunk_idx+1) * len(compiled_outputs) // chunks, len(compiled_outputs))]
     print("- Profile all stages")
@@ -605,6 +605,7 @@ def cluster_layers_and_slice_mesh(
         submesh_choices = get_submesh_choices(
             virtual_mesh.num_hosts, virtual_mesh.num_devices_per_host,
             stage_option.submesh_physical_shape_space)
+        submesh_choices = submesh_choices[-1:]
         autosharding_configs = get_all_submesh_autosharding_config_choices(
             virtual_mesh, submesh_choices,
             stage_option.submesh_logical_shape_space, batch_size)
