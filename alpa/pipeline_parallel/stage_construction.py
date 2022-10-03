@@ -363,7 +363,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
     timers("stage-construction-compilation").suspend()
 
     stages = sorted(stages, key=lambda x: x[0])
-    chunks = 10
+    chunks = 1
     chunk_idx = 0
     stages = stages[chunk_idx * len(stages) // chunks: min((chunk_idx+1) * len(stages) // chunks, len(stages))]
     compiled_outputs = compiled_outputs[chunk_idx * len(compiled_outputs) // chunks: min((chunk_idx+1) * len(compiled_outputs) // chunks, len(compiled_outputs))]
