@@ -330,7 +330,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
                 lambda x: x is not None,
                 [apply_grad_layers[idx] for idx in indices[start:end + 1]])
             stage_name = f"stage_{start}_{end}"
-            (intermediate_vars, stage_config) = generate_stage_info(
+            (intermediate_vars, stage_config, input_idx) = generate_stage_info(
                 layers, layer_indices, donation_mapping,
                 global_outvars, stage_name, end - start,
                 list(selected_apply_grad_layers), apply_grad_global_info)
@@ -343,7 +343,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
                     if is_profiled[start, end, config_idx]:
                         continue
                     stages.append((stage_indices, stage_config,
-                                   autosharding_config, intermediate_vars))
+                                   autosharding_config, intermediate_vars, input_idx))
 
     if len(stages) == 0:
         # Suspend timers

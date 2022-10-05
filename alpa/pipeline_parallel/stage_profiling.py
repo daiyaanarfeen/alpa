@@ -251,7 +251,7 @@ class ProfileWorker:
         self.virtual_mesh = virtual_mesh
 
     def _profile_impl(self, stage_id, compiled_output, profile_info,
-                      intermediate_size, initial_size):
+                      intermediate_size, initial_size, input_idx):
         """Implementation of profile function.
 
         The profiler first compile the HLO Proto into Mesh Executable, then
@@ -298,6 +298,11 @@ class ProfileWorker:
         cost = executable.profile_with_dummy_inputs(skip_grad_sync=True)
         del executable
 
+        import ipdb; ipdb.set_trace()
+        gensym_fn = gensym([])
+        input_var = gensym_fn(avals[input_idx])
+        input_shard_spec = hlo_sharding_to_sharding_spec(xe.HloSharding(input_shardings[input_idx]), avals[input_idx], self.mesh.shape)
+        input_size = _compute_vars_size([input_shard_spec], [input_var], self.mesh.shape)
         if np.mean(cost) == np.inf:
             max_stage = -1
         else:
@@ -309,7 +314,7 @@ class ProfileWorker:
                                            intermediate_size, initial_size)
 
     def profile(self, stage_id, compiled_output, profile_info,
-                intermediate_size, initial_size):
+                intermediate_size, initial_size, input_idx):
         """Run profiling on this profile worker.
 
         If the RayActorError is catched, it retries until profile_maximum_retry
@@ -320,7 +325,7 @@ class ProfileWorker:
             try:
                 return self._profile_impl(stage_id, compiled_output,
                                           profile_info, intermediate_size,
-                                          initial_size)
+                                          initial_size, input_idx)
             except RayActorError as e:
                 logger.warning(f"Meet ray actor error in profiling: {e}")
                 self.restart(forced=True)
@@ -436,7 +441,7 @@ def compile_all(stages, num_micro_batches, default_as_option):
 
     compile_workers = CompileWorkerPool(num_cpus)
     for stage_id, (_, stage_config, auto_sharding_config,
-                   _) in enumerate(stages):
+                   _, _) in enumerate(stages):
         logical_mesh, autosharding_option_dict = auto_sharding_config
         compile_workers.submit(
             lambda w, v: w.compile_stage_for_profiling.remote(*v),
@@ -493,7 +498,7 @@ def profile_all(stages, compiled_outputs: Sequence[CompileOutput], meshes,
         config = compiled_output.stage_plan
         hooked_proto = compiled_output.intermediate_proto
         apply_in_shardings = compiled_output.apply_grad_input_sharding_protos
-        (start, end, config_idx), stage_config, _, intermediate_vars = stage
+        (start, end, config_idx), stage_config, _, intermediate_vars, input_idx = stage
         if is_profiled[start, end, config_idx]:
             continue
         intermediate_size = compute_intermediate_size(hooked_proto,
@@ -505,7 +510,7 @@ def profile_all(stages, compiled_outputs: Sequence[CompileOutput], meshes,
         profile_workers.submit(
             lambda w, v: w.profile.remote(*v),
             (stage_id, compiled_output, stage_config.profile_config,
-             intermediate_size, apply_grad_input_size))
+             intermediate_size, apply_grad_input_size, input_idx))
         succ_compile_ct += 1
 
     pbar = tqdm.tqdm(range(succ_compile_ct))
@@ -655,6 +660,8 @@ def generate_stage_info(all_layers, selected_indices, donation_mapping,
     ]
     profile_config = ProfileConfig(compute_avals, compute_out_avals,
                                    list(is_donated), output_acc_grad_indices)
+    inputs = [var for var in merged.jaxpr.invars if len(var.aval.shape) >= 1 and var.aval.shape[0] == 40]
+    input_idx = merged.jaxpr.invars.index(inputs[0])
 
     apply_info = ApplyGradConfig(None, None)
 
@@ -684,7 +691,7 @@ def generate_stage_info(all_layers, selected_indices, donation_mapping,
     proto = hlo_module.as_serialized_hlo_module_proto()
     compile_config = CompileConfig(proto, output_acc_grad_indices)
     stage_config = StageConfig(compile_config, profile_config, apply_info)
-    return intermediate_vars, stage_config
+    return intermediate_vars, stage_config, input_idx
 
 
 def create_collective_group(src_mesh: PhysicalDeviceMesh,
