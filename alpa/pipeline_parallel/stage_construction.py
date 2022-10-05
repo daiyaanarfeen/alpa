@@ -362,7 +362,6 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
         return compute_cost, max_n_succ_stages, is_profiled
     timers("stage-construction-compilation").suspend()
 
-    stages = sorted(stages, key=lambda x: x[0])
     chunks = 1
     chunk_idx = 0
     stages = stages[chunk_idx * len(stages) // chunks: min((chunk_idx+1) * len(stages) // chunks, len(stages))]
@@ -605,7 +604,6 @@ def cluster_layers_and_slice_mesh(
         submesh_choices = get_submesh_choices(
             virtual_mesh.num_hosts, virtual_mesh.num_devices_per_host,
             stage_option.submesh_physical_shape_space)
-        submesh_choices = submesh_choices[-1:]
         autosharding_configs = get_all_submesh_autosharding_config_choices(
             virtual_mesh, submesh_choices,
             stage_option.submesh_logical_shape_space, batch_size)
