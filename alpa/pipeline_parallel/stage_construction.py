@@ -305,7 +305,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
     num_autosharding_configs = len(autosharding_configs)
     indices = list(range(2 * num_layers))
     stages = []
-    compute_cost, max_n_succ_stages, is_profiled = mesh_cached_result
+    compute_cost, max_n_succ_stages, is_profiled, peak_memory, initial_size, input_size = mesh_cached_result
 
     print("- Generate all stage infos (Jaxpr -> HLO)")
     # TODO(yonghao): only generate these info once for all mesh shapes
@@ -371,11 +371,12 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
     # (num_layers, num_layers, num_autosharding_configs)
     timers("stage-construction-profiling").start()
     (compute_cost, max_n_succ_stages,
-     is_profiled) = profile_all(stages, compiled_outputs, meshes, num_layers,
+     is_profiled, peak_memory,
+     initial_size, input_size) = profile_all(stages, compiled_outputs, meshes, num_layers,
                                 num_autosharding_configs, num_micro_batches,
                                 auto_stage_option, mesh_cached_result)
     timers("stage-construction-profiling").suspend()
-    return compute_cost, max_n_succ_stages, is_profiled
+    return compute_cost, max_n_succ_stages, is_profiled, peak_memory, initial_size, input_size
 
 
 def _get_layer_flops_prefix_sum(layers):
@@ -455,6 +456,13 @@ def get_compute_cost(
              num_autosharding_configs), -1)
         is_profiled = np.full((num_layers, num_layers, num_submesh_choices,
                                num_autosharding_configs), 0)
+        peak_memory = np.full((num_layers, num_layers, num_submesh_choices,
+                               num_autosharding_configs), 0)
+        initial_size = np.full((num_layers, num_layers, num_submesh_choices,
+                               num_autosharding_configs), 0)
+        input_size = np.full((num_layers, num_layers, num_submesh_choices,
+                               num_autosharding_configs), 0)
+
     print("-" * 20 + " Automatic stage clustering " + "-" * 20)
     print(f"submesh_choices: {submesh_choices}")
 
@@ -475,9 +483,13 @@ def get_compute_cost(
 
         mesh_cached_result = (compute_cost[:, :, mesh_id, :],
                               max_n_succ_stages[:, :, mesh_id, :],
-                              is_profiled[:, :, mesh_id, :])
+                              is_profiled[:, :, mesh_id, :],
+                              peak_memory[:, :, mesh_id, :], 
+                              initial_size[:, :, mesh_id, :], 
+                              input_size[:, :, mesh_id, :])
         (mesh_compute_cost, mesh_max_n_succ_stages,
-         mesh_profiled) = distributed_profile_on_mesh(
+         mesh_profiled, mesh_peak_memory, 
+         mesh_initial_size, mesh_input_size) = distributed_profile_on_mesh(
              sliced_virtual_meshes, layers, donation_mapping, global_outvars,
              apply_grad_layers, apply_grad_global_info,
              autosharding_configs[mesh_id], cluster_size,
@@ -487,6 +499,10 @@ def get_compute_cost(
         compute_cost[:, :, mesh_id, :] = mesh_compute_cost
         max_n_succ_stages[:, :, mesh_id, :] = mesh_max_n_succ_stages
         is_profiled[:, :, mesh_id, :] = mesh_profiled
+        peak_memory[:, :, mesh_id, :] = mesh_peak_memory
+        initial_size[:, :, mesh_id, :] = mesh_initial_size
+        input_size[:, :, mesh_id, :] = mesh_input_size
+
         toc = time()
         print(f"Profiling for submesh {mesh_id} {submesh} takes {toc - tic:.2f}"
               f" seconds")
@@ -497,7 +513,7 @@ def get_compute_cost(
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     compute_cost_file_name = (f"compute-cost-{timestamp}.npy")
     np.save(compute_cost_file_name,
-            (compute_cost, max_n_succ_stages, is_profiled))
+            (compute_cost, max_n_succ_stages, is_profiled, peak_memory, initial_size, input_size))
     global last_compute_cost_file_name
     last_compute_cost_file_name = compute_cost_file_name
     print(f"Compute cost saved to: {compute_cost_file_name}")

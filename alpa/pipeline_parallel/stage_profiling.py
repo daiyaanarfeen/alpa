@@ -298,11 +298,14 @@ class ProfileWorker:
         cost = executable.profile_with_dummy_inputs(skip_grad_sync=True)
         del executable
 
-        import ipdb; ipdb.set_trace()
-        gensym_fn = gensym([])
-        input_var = gensym_fn(avals[input_idx])
-        input_shard_spec = hlo_sharding_to_sharding_spec(xe.HloSharding(input_shardings[input_idx]), avals[input_idx], self.mesh.shape)
-        input_size = _compute_vars_size([input_shard_spec], [input_var], self.mesh.shape)
+        try:
+            gensym_fn = gensym([])
+            input_var = gensym_fn(avals[input_idx])
+            input_shard_spec = hlo_sharding_to_sharding_spec(xe.HloSharding(input_shardings[input_idx]), avals[input_idx], self.mesh.shape)
+            input_size = _compute_vars_size([input_shard_spec], [input_var], self.mesh.shape)
+        except:
+            input_size = 0
+
         if np.mean(cost) == np.inf:
             max_stage = -1
         else:
@@ -311,7 +314,7 @@ class ProfileWorker:
             max_stage = min(max(-1, max_stage), INFINITY_N_STAGES)
 
         return stage_id, cost, max_stage, (peak_memory, available_memory,
-                                           intermediate_size, initial_size)
+                                           intermediate_size, initial_size, input_size)
 
     def profile(self, stage_id, compiled_output, profile_info,
                 intermediate_size, initial_size, input_idx):
@@ -337,7 +340,7 @@ class ProfileWorker:
                 logger.warning(f"Meet assertion error in profiling: {e}")
                 self.restart(forced=True)
                 break
-        return stage_id, np.inf, -1, (np.inf, 0, 0, 0)
+        return stage_id, np.inf, -1, (np.inf, 0, 0, 0, 0)
 
     def restart(self, forced):
         """Restart the physical mesh."""
@@ -472,7 +475,7 @@ def profile_all(stages, compiled_outputs: Sequence[CompileOutput], meshes,
     This function launches a profile worker pool and submits given tasks.
     """
     # pylint: disable=unused-argument
-    compute_cost, max_n_succ_stages, is_profiled = mesh_cached_result
+    compute_cost, max_n_succ_stages, is_profiled, peak_memory, initial_size, input_size = mesh_cached_result
 
     if auto_stage_option.use_hlo_cost_model:
         num_cpus = int(
@@ -529,23 +532,26 @@ def profile_all(stages, compiled_outputs: Sequence[CompileOutput], meshes,
                            "all profile workers are forcely killed")
             return compute_cost, max_n_succ_stages, is_profiled
         ((start, end, config_idx), _, auto_sharding_config,
-         _) = stages[stage_id]
+         _, _) = stages[stage_id]
         logical_mesh, auto_sharding_dict = auto_sharding_config
-        (peak_memory, available_memory, intermediate_size,
-         initial_size) = debug_info
+        (peak_mem, available_memory, intermediate_size,
+         init_sz, in_sz) = debug_info
         compute_cost[start, end, config_idx] = np.mean(cost)
         max_n_succ_stages[start, end, config_idx] = max_stage
         is_profiled[start, end, config_idx] = 1
+        peak_memory[start, end, config_idx] = peak_mem
+        initial_size[start, end, config_idx] = init_sz
+        input_size[start, end, config_idx] = in_sz
         pbar.write(f"cost[{start}, {end}, {config_idx}]"
                    f"={compute_cost[start, end, config_idx]:.3f},"
                    f" max_n_succ_stage={max_stage},"
                    f" Mem: avail={available_memory / GB:.3f}GB,"
-                   f" peak={peak_memory / GB:.3f}GB,"
+                   f" peak={peak_mem / GB:.3f}GB,"
                    f" intermediate={intermediate_size / GB:.3f}GB,"
-                   f" init={initial_size / GB:.3f}GB,"
+                   f" init={init_sz / GB:.3f}GB,"
                    f" as_config={(logical_mesh.shape, auto_sharding_dict)}")
     profile_workers.shutdown()
-    return compute_cost, max_n_succ_stages, is_profiled
+    return compute_cost, max_n_succ_stages, is_profiled, peak_memory, initial_size, input_size
 
 
 def split_global_use_and_donate(layers: Sequence[JaxPipelineComputation],
