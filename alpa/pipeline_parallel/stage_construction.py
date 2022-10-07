@@ -292,7 +292,7 @@ def get_all_submesh_autosharding_config_choices(virtual_mesh, submesh_choices,
 
 
 def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
-                                donation_mapping, global_outvars,
+                                donation_mapping, global_invars, global_outvars,
                                 apply_grad_layers, apply_grad_global_info,
                                 autosharding_configs, cluster_size,
                                 layer_flops_prefix_sum, num_micro_batches,
@@ -332,7 +332,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
             stage_name = f"stage_{start}_{end}"
             (intermediate_vars, stage_config, input_idx) = generate_stage_info(
                 layers, layer_indices, donation_mapping,
-                global_outvars, stage_name, end - start,
+                global_invars, global_outvars, stage_name, end - start,
                 list(selected_apply_grad_layers), apply_grad_global_info)
 #            if is_full_mesh:
 #                intermediate_vars = []
@@ -393,7 +393,7 @@ def get_compute_cost(
         autosharding_configs: Sequence[Sequence[Tuple[LogicalDeviceMesh,
                                                       dict]]],
         layers: Sequence[JaxPipelineComputation],
-        donation_mapping: Dict[Var, Var], global_outvars: Sequence[Var],
+        donation_mapping: Dict[Var, Var], global_invars: Sequence[Var], global_outvars: Sequence[Var],
         apply_grad_layers: Sequence[JaxPipelineComputation],
         apply_grad_global_info: Tuple, num_micro_batches: int,
         default_as_option: AutoShardingOption,
@@ -490,7 +490,7 @@ def get_compute_cost(
         (mesh_compute_cost, mesh_max_n_succ_stages,
          mesh_profiled, mesh_peak_memory, 
          mesh_initial_size, mesh_input_size) = distributed_profile_on_mesh(
-             sliced_virtual_meshes, layers, donation_mapping, global_outvars,
+             sliced_virtual_meshes, layers, donation_mapping, global_invars, global_outvars,
              apply_grad_layers, apply_grad_global_info,
              autosharding_configs[mesh_id], cluster_size,
              layer_flops_prefix_sum, num_micro_batches, default_as_option,
@@ -567,7 +567,7 @@ def get_sliced_virtual_submeshes(virtual_mesh, submesh_shapes):
 def cluster_layers_and_slice_mesh(
         layers: Sequence[JaxPipelineComputation],
         virtual_mesh: VirtualPhysicalMesh, donation_mapping: Dict[Var, Var],
-        final_outvars: Sequence[Var], num_micro_batches: int, batch_size: int,
+        invars: Sequence[Var], final_outvars: Sequence[Var], num_micro_batches: int, batch_size: int,
         jax_apply_layers: Sequence[JaxPipelineComputation],
         apply_grad_global_info: Tuple, pipeline_schedule: str,
         default_as_option: AutoShardingOption, stage_option: StageOption):
@@ -628,7 +628,7 @@ def cluster_layers_and_slice_mesh(
         # Use DP to find the optimal solution.
         compute_cost, max_n_succ_stages = get_compute_cost(
             virtual_mesh, submesh_choices, autosharding_configs, layers,
-            donation_mapping, final_outvars, jax_apply_layers,
+            donation_mapping, invars, final_outvars, jax_apply_layers,
             apply_grad_global_info, num_micro_batches, default_as_option,
             stage_option)
         _, solution = dp(num_layers, virtual_mesh.num_devices,

@@ -628,7 +628,7 @@ def split_sharding_specs(layers: Sequence[JaxPipelineComputation],
 
 
 def generate_stage_info(all_layers, selected_indices, donation_mapping,
-                        global_outvars, name, insert_hook_after,
+                        global_invars, global_outvars, name, insert_hook_after,
                         apply_grad_layers, apply_grad_info):
     """Combine selected layers together for profiling."""
     backend = xb.get_backend("gpu")

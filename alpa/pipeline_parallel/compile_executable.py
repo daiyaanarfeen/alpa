@@ -102,6 +102,8 @@ def compile_pipeshard_executable_internal(
     global_outvars = closed_jaxpr.jaxpr.outvars
     gensym_func = gensym([closed_jaxpr.jaxpr])
 
+    invars = [var for (var, is_batch) in zip(global_invars, batch_invars) if is_batch]
+
     # Split the jaxpr into compute_grad and apply_grad
     inference_mode = (pipeline_schedule == "inference")
     (closed_jaxpr, compute_grad_jaxpr, apply_grad_jaxpr,
@@ -148,7 +150,7 @@ def compile_pipeshard_executable_internal(
     # Construct pipeline stages by merging layers
     (jax_pipeline_stages, stage_to_mesh, sliced_virtual_meshes,
      manual_stage_option) = cluster_layers_and_slice_mesh(
-         jax_pipeline_layers, virtual_mesh, donation_mapping, acc_grad_outvars,
+         jax_pipeline_layers, virtual_mesh, donation_mapping, acc_grad_invars, acc_grad_outvars,
          num_microbatch, micro_batch_size, jax_apply_layers,
          apply_grad_global_info, pipeline_schedule, default_as_option,
          stage_option)
