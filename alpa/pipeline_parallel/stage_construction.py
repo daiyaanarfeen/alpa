@@ -313,7 +313,7 @@ def distributed_profile_on_mesh(meshes: Sequence[VirtualPhysicalMesh], layers,
     is_full_mesh = computation_source_ratio == 1
     tolerance = auto_stage_option.stage_imbalance_tolerance
     for start in tqdm.tqdm(range(0, num_layers)):
-        for end in tqdm.tqdm(range(start, min(start+1, num_layers)), leave=False):
+        for end in tqdm.tqdm(range(start, num_layers), leave=False):
 #            if is_full_mesh and not (start == 0 and end == num_layers - 1):
 #                continue
             flops_ratio = (

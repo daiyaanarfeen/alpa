@@ -13,9 +13,9 @@ wresnet_specs = {
     "250M": (224, 50, 160, 2, "fp32"),
     "500M": (224, 50, 224, 2, "fp32"),
     "1B": (224, 50, 320, 2, "fp32"),
-    "2B": (224, 50, 448, 2, "fp32"),
+    "2B": (224, 50, 448, 2, "fp16"),
     "4B": (224, 50, 640, 2, "fp32"),
-    "6.8B": (224, 50, 320, 16, "fp32"),
+    "6.8B": (224, 50, 320, 16, "fp16"),
     "13B": (224, 101, 320, 16, "fp16"),
 }
 
@@ -137,9 +137,9 @@ grid_search_auto_suite = {  # key = the number of gpus, value = a list of cases
     1: get_search_cases("250M", 1536, [24, 32]),
     2: get_search_cases("500M", 1536, [24, 32]),
     4: get_search_cases("1B", 1536, [24, 32]),
-#    8: get_search_cases("2B", 1536, [24, 32]),
+    8: get_search_cases("2B", 1536, [24, 32]),
     16: get_search_cases("4B", 1536, [24, 32]),
     32: (get_search_cases("6.8B", 1520, [38]) +
      get_search_cases("6.8B", 1512, [42])),
-    8: get_search_cases("13B", 1520, [38]),
+#    8: get_search_cases("13B", 1520, [38]),
 }
